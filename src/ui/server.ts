@@ -4,7 +4,9 @@ import { HomebridgePluginUiServer, RequestError } from '@homebridge/plugin-ui-ut
 
 import { describeMowState, deriveMowerState } from '../mower/state.js';
 import { findMowers } from '../roborock/mower.js';
-import { clearSession, type PlatformStatus, readSession, readStatus, type StatusDevice, writeSession, writeStatus } from '../roborock/session-store.js';
+import {
+  clearSession, clearStatus, type PlatformStatus, readSession, readStatus, type StatusDevice, writeSession, writeStatus,
+} from '../roborock/session-store.js';
 import type { RegionInfo, StoredSession } from '../roborock/types.js';
 import { RoborockWebApi } from '../roborock/web-api.js';
 
@@ -25,7 +27,8 @@ interface DevicesResponse extends PlatformStatus {
 const STALE_AFTER_MS = 2 * 60 * 60_000;
 
 class RoborockMowerUiServer extends HomebridgePluginUiServer {
-  // One cloud client per account for the life of this UI process, so the send/verify pair shares its rate limiter.
+  // One cloud client (and clientId) per account for the life of this UI process, so repeated "Send code" clicks
+  // and the verify step share one rate limiter and one learned region.
   private current?: { email: string; clientId: string; api: RoborockWebApi };
 
   constructor() {
@@ -45,11 +48,12 @@ class RoborockMowerUiServer extends HomebridgePluginUiServer {
     return this.homebridgeStoragePath;
   }
 
-  private apiFor(email: string, clientId: string, region?: RegionInfo): RoborockWebApi {
-    if (this.current?.email !== email || this.current.clientId !== clientId) {
-      this.current = { email, clientId, api: new RoborockWebApi({ email, clientId, region }) };
+  private apiFor(email: string, clientId?: string, region?: RegionInfo) {
+    const id = clientId ?? (this.current?.email === email ? this.current.clientId : randomUUID());
+    if (this.current?.email !== email || this.current.clientId !== id) {
+      this.current = { email, clientId: id, api: new RoborockWebApi({ email, clientId: id, region }) };
     }
-    return this.current.api;
+    return this.current;
   }
 
   private async session(): Promise<{ email: string | null; lastError?: string }> {
@@ -59,20 +63,21 @@ class RoborockMowerUiServer extends HomebridgePluginUiServer {
   }
 
   private async sendCode({ email }: SendCodePayload) {
-    const clientId = randomUUID();
-    const region = await this.apiFor(email, clientId).requestEmailCode();
+    const { clientId, api } = this.apiFor(email);
+    const region = await api.requestEmailCode();
     return { clientId, region };
   }
 
   private async verifyCode({ email, clientId, region, code }: VerifyCodePayload): Promise<{ email: string }> {
-    const userData = await this.apiFor(email, clientId, region).loginWithCode(code.trim());
+    const userData = await this.apiFor(email, clientId, region).api.loginWithCode(code.trim());
     await writeSession(this.storagePath, { email, clientId, region, userData });
-    await writeStatus(this.storagePath, { updatedAt: 0, devices: [] }); // clears any session-expired flag
+    await clearStatus(this.storagePath); // drops a stale session-expired flag; the platform rewrites it on its next sync
     return { email };
   }
 
   private async signOut(): Promise<void> {
     await clearSession(this.storagePath);
+    await clearStatus(this.storagePath);
   }
 
   // Serves the platform's status file; only a freshly signed-in account (no status yet) costs a cloud call.
@@ -91,7 +96,7 @@ class RoborockMowerUiServer extends HomebridgePluginUiServer {
   }
 
   private async fetchStatus(session: StoredSession): Promise<PlatformStatus> {
-    const api = this.apiFor(session.email, session.clientId, session.region);
+    const { api } = this.apiFor(session.email, session.clientId, session.region);
     const homeId = await api.getHomeId(session.userData);
     const home = await api.getHomeData(session.userData, homeId);
     const devices: StatusDevice[] = findMowers(home).map((mower) => {
