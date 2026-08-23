@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { HomebridgePluginUiServer, RequestError } from '@homebridge/plugin-ui-utils';
 
+import { describeMowState, deriveMowerState } from '../mower/state.js';
 import { findMowers } from '../roborock/mower.js';
-import { clearSession, readSession, writeSession } from '../roborock/session-store.js';
-import type { RegionInfo } from '../roborock/types.js';
+import { clearSession, type PlatformStatus, readSession, readStatus, type StatusDevice, writeSession, writeStatus } from '../roborock/session-store.js';
+import type { RegionInfo, StoredSession } from '../roborock/types.js';
 import { RoborockWebApi } from '../roborock/web-api.js';
 
 interface SendCodePayload {
@@ -17,7 +18,16 @@ interface VerifyCodePayload extends SendCodePayload {
   code: string;
 }
 
+interface DevicesResponse extends PlatformStatus {
+  stale: boolean;
+}
+
+const STALE_AFTER_MS = 2 * 60 * 60_000;
+
 class RoborockMowerUiServer extends HomebridgePluginUiServer {
+  // One cloud client per account for the life of this UI process, so the send/verify pair shares its rate limiter.
+  private current?: { email: string; clientId: string; api: RoborockWebApi };
+
   constructor() {
     super();
     this.onRequest('/session', () => this.guard(() => this.session()));
@@ -35,22 +45,29 @@ class RoborockMowerUiServer extends HomebridgePluginUiServer {
     return this.homebridgeStoragePath;
   }
 
-  private async session(): Promise<{ email: string | null }> {
+  private apiFor(email: string, clientId: string, region?: RegionInfo): RoborockWebApi {
+    if (this.current?.email !== email || this.current.clientId !== clientId) {
+      this.current = { email, clientId, api: new RoborockWebApi({ email, clientId, region }) };
+    }
+    return this.current.api;
+  }
+
+  private async session(): Promise<{ email: string | null; lastError?: string }> {
     const session = await readSession(this.storagePath);
-    return { email: session?.email ?? null };
+    const status = await readStatus(this.storagePath);
+    return { email: session?.email ?? null, lastError: status?.lastError };
   }
 
   private async sendCode({ email }: SendCodePayload) {
     const clientId = randomUUID();
-    const api = new RoborockWebApi({ email, clientId });
-    const region = await api.requestEmailCode();
+    const region = await this.apiFor(email, clientId).requestEmailCode();
     return { clientId, region };
   }
 
   private async verifyCode({ email, clientId, region, code }: VerifyCodePayload): Promise<{ email: string }> {
-    const api = new RoborockWebApi({ email, clientId, region });
-    const userData = await api.loginWithCode(code.trim());
+    const userData = await this.apiFor(email, clientId, region).loginWithCode(code.trim());
     await writeSession(this.storagePath, { email, clientId, region, userData });
+    await writeStatus(this.storagePath, { updatedAt: 0, devices: [] }); // clears any session-expired flag
     return { email };
   }
 
@@ -58,17 +75,40 @@ class RoborockMowerUiServer extends HomebridgePluginUiServer {
     await clearSession(this.storagePath);
   }
 
-  private async devices() {
+  // Serves the platform's status file; only a freshly signed-in account (no status yet) costs a cloud call.
+  private async devices(): Promise<DevicesResponse> {
+    const status = await readStatus(this.storagePath);
+    if (status && status.updatedAt > 0) {
+      return { ...status, stale: Date.now() - status.updatedAt > STALE_AFTER_MS };
+    }
     const session = await readSession(this.storagePath);
     if (!session) {
       throw new Error('Not signed in.');
     }
-    const api = new RoborockWebApi({ email: session.email, clientId: session.clientId, region: session.region });
+    const fresh = await this.fetchStatus(session);
+    await writeStatus(this.storagePath, fresh);
+    return { ...fresh, stale: false };
+  }
+
+  private async fetchStatus(session: StoredSession): Promise<PlatformStatus> {
+    const api = this.apiFor(session.email, session.clientId, session.region);
     const homeId = await api.getHomeId(session.userData);
     const home = await api.getHomeData(session.userData, homeId);
-    const mowers = findMowers(home);
-    const total = (home.devices?.length ?? 0) + (home.receivedDevices?.length ?? 0);
-    return { mowers, otherDeviceCount: total - mowers.length };
+    const devices: StatusDevice[] = findMowers(home).map((mower) => {
+      const state = deriveMowerState(Object.fromEntries(Object.entries(mower.deviceStatus ?? {}).map(([k, v]) => [Number(k), v])));
+      return {
+        duid: mower.duid,
+        name: mower.name,
+        model: mower.model,
+        productName: mower.productName,
+        online: mower.online !== false,
+        fv: mower.fv,
+        mowState: state.mowState,
+        mowStateName: describeMowState(state.mowState),
+        battery: state.battery,
+      };
+    });
+    return { updatedAt: Date.now(), devices };
   }
 
   private async guard<T>(run: () => Promise<T>): Promise<T> {

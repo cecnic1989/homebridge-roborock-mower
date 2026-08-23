@@ -20,26 +20,39 @@
     }
   }
 
-  function renderDevices({ mowers, otherDeviceCount }) {
+  function renderDevices({ devices, updatedAt, stale }) {
     const container = $('devices');
     container.replaceChildren();
-    if (mowers.length === 0) {
+    if (devices.length === 0) {
       const p = document.createElement('p');
       p.className = 'text-warning';
-      p.textContent = `No mower found on this account (${otherDeviceCount} other Roborock device(s)).`;
+      p.textContent = 'No mower found on this account. Restart Homebridge after adding one in the Roborock app.';
       container.appendChild(p);
       return;
     }
-    for (const mower of mowers) {
-      const details = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = `${mower.name} — ${mower.model}${mower.online === false ? ' (offline)' : ''}`;
-      const pre = document.createElement('pre');
-      pre.className = 'small mt-2';
-      pre.textContent = JSON.stringify(mower, null, 2);
-      details.append(summary, pre);
-      container.appendChild(details);
+    for (const device of devices) {
+      const row = document.createElement('div');
+      row.className = 'mb-2';
+      const title = document.createElement('strong');
+      title.textContent = device.name;
+      const detail = document.createElement('div');
+      detail.className = 'small';
+      const bits = [device.model, device.online ? (device.mowStateName ?? 'state unknown') : 'offline'];
+      if (device.battery !== undefined) {
+        bits.push(`battery ${device.battery}%`);
+      }
+      if (device.fv) {
+        bits.push(`firmware ${device.fv}`);
+      }
+      detail.textContent = bits.join(' · ');
+      row.append(title, detail);
+      container.appendChild(row);
     }
+    const when = document.createElement('p');
+    when.className = 'small mt-2';
+    const minutes = Math.max(0, Math.round((Date.now() - updatedAt) / 60_000));
+    when.textContent = `Last synced ${minutes} min ago${stale ? ' — is Homebridge running?' : ''}.`;
+    container.appendChild(when);
   }
 
   // A freshly installed plugin has no platform block yet; without one Homebridge never starts the platform.
@@ -64,13 +77,15 @@
 
   async function render() {
     let email = null;
+    let lastError;
     try {
-      ({ email } = await request('/session'));
+      ({ email, lastError } = await request('/session'));
     } catch (error) {
       homebridge.toast.error(error.message, 'Could not read sign-in state');
     }
     show($('signed-out'), !email);
     show($('signed-in'), Boolean(email));
+    show($('session-expired'), lastError === 'session-expired');
     if (!email) {
       return;
     }
