@@ -1,0 +1,53 @@
+{
+  "name": "@cecnic1989/homebridge-roborock-mower",
+  "displayName": "Homebridge Roborock Mower",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Homebridge plugin for Roborock RockMow robot lawn mowers",
+  "author": "cecnic1989",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/cecnic1989/homebridge-roborock-mower#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cecnic1989/homebridge-roborock-mower.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cecnic1989/homebridge-roborock-mower/issues"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/cecnic1989"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "roborock",
+    "rockmow",
+    "lawn-mower",
+    "robot-mower",
+    "homekit"
+  ],
+  "main": "dist/index.js",
+  "engines": {
+    "node": "^20.19.0 || ^22.10.0 || ^24.0.0",
+    "homebridge": "^1.8.0 || ^2.0.0-beta.0"
+  },
+  "scripts": {
+    "watch": "npm run build && npm link && nodemon",
+    "build": "rimraf ./dist && tsc",
+    "lint": "eslint . --max-warnings=0",
+    "test": "tsx --test test/platform.test.ts",
+    "prepublishOnly": "npm run lint && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.0.0",
+    "eslint": "^10.2.0",
+    "homebridge": "^2.0.0-beta.55",
+    "homebridge-config-ui-x": "^5.22.0",
+    "nodemon": "^3.1.11",
+    "rimraf": "^6.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.46.4"
+  }
+}

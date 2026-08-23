@@ -1,0 +1,29 @@
+{
+  "pluginAlias": "RoborockMower",
+  "pluginType": "platform",
+  "singular": true,
+  "strictValidation": false,
+  "headerDisplay": "Homebridge plugin for Roborock RockMow robot lawn mowers.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Roborock Mower"
+      },
+      "pollInterval": {
+        "title": "Poll Interval (seconds)",
+        "type": "integer",
+        "default": 60,
+        "minimum": 15,
+        "maximum": 3600,
+        "description": "How often to poll mower status"
+      }
+    }
+  },
+  "layout": [
+    "name",
+    "pollInterval"
+  ]
+}
