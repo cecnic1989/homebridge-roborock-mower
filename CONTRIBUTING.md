@@ -29,6 +29,8 @@ npm test
 
 Runs the `node:test` suites under `test/`. No network or credentials required. CI runs this on every push and PR.
 
+Test behavior, not plumbing. A test earns its place by naming the bug it would catch: a protocol vector (hash, signature, frame decode), a state transition, a fallback path, an error mapping, a no-crash path. Do not test trivial helpers, one-line wrappers, or assert a header/field at a time — those only pin down the current implementation.
+
 ## Local Homebridge Dev
 
 Runs a real Homebridge instance. Auto-rebuilds on save.
