@@ -46,6 +46,12 @@
       }
       detail.textContent = bits.join(' · ');
       row.append(title, detail);
+      if (device.attention) {
+        const warning = document.createElement('div');
+        warning.className = 'small text-warning';
+        warning.textContent = `Needs attention: ${device.attention}`;
+        row.appendChild(warning);
+      }
       container.appendChild(row);
     }
     const when = document.createElement('p');

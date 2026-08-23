@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { HomebridgePluginUiServer, RequestError } from '@homebridge/plugin-ui-utils';
 
-import { describeMowState, deriveMowerState } from '../mower/state.js';
+import { describeAttention, describeMowState, deriveMowerState } from '../mower/state.js';
 import { findMowers } from '../roborock/mower.js';
 import {
   clearSession, clearStatus, type PlatformStatus, readSession, readStatus, type StatusDevice, writeSession, writeStatus,
@@ -110,6 +110,7 @@ class RoborockMowerUiServer extends HomebridgePluginUiServer {
         fv: mower.fv,
         mowState: state.mowState,
         mowStateName: describeMowState(state.mowState),
+        attention: describeAttention(state),
         battery: state.battery,
       };
     });

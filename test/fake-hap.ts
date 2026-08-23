@@ -26,6 +26,8 @@ export class FakeService {
     return existing;
   }
 
+  addOptionalCharacteristic(): void {}
+
   setCharacteristic(c: { name: string }, value: unknown): this {
     this.getCharacteristic(c).value = value;
     return this;

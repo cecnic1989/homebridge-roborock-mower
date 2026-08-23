@@ -7,6 +7,7 @@ export interface SensorOptions {
   leaving: boolean;
   mowing: boolean;
   returning: boolean;
+  attention: boolean;
   battery: boolean;
   faultIndicator: boolean;
   debounceSeconds: number;
@@ -18,10 +19,12 @@ export interface DeviceInformation {
   firmware?: string;
 }
 
-type SensorKey = 'docked' | 'leaving' | 'mowing' | 'returning';
+type SensorKey = 'docked' | 'leaving' | 'mowing' | 'returning' | 'attention';
 type Hap = Pick<API['hap'], 'Service' | 'Characteristic'>;
 
-const SENSOR_LABELS: Record<SensorKey, string> = { docked: 'Docked', leaving: 'Leaving', mowing: 'Mowing', returning: 'Returning' };
+const SENSOR_LABELS: Record<SensorKey, string> = {
+  docked: 'Docked', leaving: 'Leaving', mowing: 'Mowing', returning: 'Returning', attention: 'Needs Attention',
+};
 const SENSOR_KEYS = Object.keys(SENSOR_LABELS) as SensorKey[];
 
 // Home-app automations trigger on "opens"/"closes". Docked closes when the mower is home;
@@ -72,6 +75,7 @@ export class MowerAccessory {
       }
       const name = this.sensorName(key);
       const service = accessory.addService(Service.ContactSensor, name, key);
+      service.addOptionalCharacteristic(Characteristic.ConfiguredName); // HAP does not list it for ContactSensor; avoids a Homebridge warning
       service.setCharacteristic(Characteristic.Name, name);
       service.setCharacteristic(Characteristic.ConfiguredName, name);
       this.sensors.set(key, service);
@@ -112,7 +116,11 @@ export class MowerAccessory {
 
   update(state: DerivedState): void {
     for (const key of this.sensors.keys()) {
-      this.schedule(key, state[key]);
+      if (key === 'attention') {
+        this.applyIfChanged(key, state.attention); // never debounced: a fault must reach the phone on the push that reports it
+      } else {
+        this.schedule(key, state[key]);
+      }
     }
     this.pushFault(state.fault);
     this.pushBattery(state);
@@ -160,6 +168,12 @@ export class MowerAccessory {
       this.apply(key, value);
     }, this.debounceMs);
     this.pending.set(key, { value, timer });
+  }
+
+  private applyIfChanged(key: SensorKey, value: boolean): void {
+    if (this.applied.get(key) !== value) {
+      this.apply(key, value);
+    }
   }
 
   private apply(key: SensorKey, value: boolean): void {

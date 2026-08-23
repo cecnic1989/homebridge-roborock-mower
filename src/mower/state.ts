@@ -38,6 +38,8 @@ const DOCKED_STATES = new Set([61, 62, 63, 68, 76, 77, 104, 105, 106, 151, 152, 
 const CHARGING_STATES = new Set([76, 151]);
 const PAUSED_STATES = new Set([17, 58, 67, 75, 107]);
 const FAULT_STATES = new Set([3, 15, 16, 59, 60, 69, 73, 74, 108, 109, 154]);
+// The physical STOP button: the mower will not resume on its own, so it counts as needing attention (an app pause does not).
+const EMERGENCY_STOP_STATES = new Set([17, 67, 75, 107]);
 const CHARGE_STATE_ON_DOCK = new Set([1, 2, 3]); // charging, completed, waiting
 const LOW_BATTERY_PERCENT = 20;
 
@@ -49,6 +51,7 @@ export interface DerivedState {
   charging: boolean;
   paused: boolean;
   fault: boolean;
+  attention: boolean;
   battery?: number;
   lowBattery: boolean;
   mowState?: number;
@@ -71,6 +74,7 @@ export function deriveMowerState(dps: Dps): DerivedState {
   const state = mowState ?? -1;
 
   const docked = (chargeState !== undefined && CHARGE_STATE_ON_DOCK.has(chargeState)) || DOCKED_STATES.has(state);
+  const fault = errorCode !== 0 || FAULT_STATES.has(state);
   return {
     docked,
     leaving: LEAVING_STATES.has(state),
@@ -78,7 +82,8 @@ export function deriveMowerState(dps: Dps): DerivedState {
     returning: !docked && (RETURNING_STATES.has(state) || offDock !== 0),
     charging: chargeState === 1 || CHARGING_STATES.has(state),
     paused: PAUSED_STATES.has(state),
-    fault: errorCode !== 0 || FAULT_STATES.has(state),
+    fault,
+    attention: fault || EMERGENCY_STOP_STATES.has(state),
     battery,
     lowBattery: battery !== undefined && battery <= LOW_BATTERY_PERCENT,
     mowState,
@@ -91,4 +96,12 @@ export function describeMowState(code: number | undefined): string {
     return 'unknown';
   }
   return MOW_STATE_NAMES[code] ?? `unknown(${code})`;
+}
+
+// Why the mower needs attention, for logs and the settings page. Roborock publishes no mower error-code table, so codes stay numeric.
+export function describeAttention(state: DerivedState): string | undefined {
+  if (!state.attention) {
+    return undefined;
+  }
+  return state.errorCode !== 0 ? `error ${state.errorCode}` : describeMowState(state.mowState);
 }

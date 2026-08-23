@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
-import { deriveMowerState, describeMowState } from '../src/mower/state.js';
+import { deriveMowerState, describeAttention, describeMowState } from '../src/mower/state.js';
 
 // Real sequence captured from a RockMow a282 (edge cut started and returned from the app), see fixtures/dps-sequence.json.
 const sequence = JSON.parse(readFileSync(new URL('./fixtures/dps-sequence.json', import.meta.url), 'utf8')) as { dps: Record<string, number> }[];
@@ -66,6 +66,20 @@ describe('deriveMowerState edge cases', () => {
     assert.equal(deriveMowerState({ 120: 0, 123: 60 }).fault, true);
     assert.equal(deriveMowerState({ 120: 0, 123: 58 }).paused, true);
     assert.equal(deriveMowerState({ 120: 0, 123: 55 }).fault, false);
+  });
+
+  test('needs attention on an error code, a fault state, or an emergency stop — not on an app pause', () => {
+    assert.equal(deriveMowerState({ 120: 7, 123: 55 }).attention, true);
+    assert.equal(deriveMowerState({ 120: 0, 123: 60 }).attention, true);
+    assert.equal(deriveMowerState({ 123: 67 }).attention, true);
+    assert.equal(deriveMowerState({ 123: 58 }).attention, false);
+    assert.equal(deriveMowerState({ 120: 0, 123: 56 }).attention, false);
+  });
+
+  test('describeAttention names the error code first, then the state, and is empty when all is well', () => {
+    assert.equal(describeAttention(deriveMowerState({ 120: 7, 123: 60 })), 'error 7');
+    assert.equal(describeAttention(deriveMowerState({ 123: 67 })), 'mow_emergency_stop');
+    assert.equal(describeAttention(deriveMowerState({ 123: 56 })), undefined);
   });
 
   test('battery level and low-battery threshold', () => {

@@ -6,11 +6,13 @@ import type { DerivedState } from '../src/mower/state.js';
 import { fakeAccessory, fakeHap, FakePlatformAccessory } from './fake-hap.js';
 import { silentLog } from './helpers.js';
 
-const allOn: SensorOptions = { docked: true, leaving: true, mowing: true, returning: true, battery: true, faultIndicator: true, debounceSeconds: 3 };
+const allOn: SensorOptions = {
+  docked: true, leaving: true, mowing: true, returning: true, attention: true, battery: true, faultIndicator: true, debounceSeconds: 3,
+};
 
 function state(overrides: Partial<DerivedState> = {}): DerivedState {
   return {
-    docked: true, leaving: false, mowing: false, returning: false, charging: false, paused: false, fault: false,
+    docked: true, leaving: false, mowing: false, returning: false, charging: false, paused: false, fault: false, attention: false,
     battery: 100, lowBattery: false, mowState: 0, errorCode: 0, ...overrides,
   };
 }
@@ -24,12 +26,16 @@ function build(options: SensorOptions = allOn) {
 describe('MowerAccessory services', () => {
   test('creates one contact sensor per enabled state plus battery, each with its own subtype and name', () => {
     const { services } = build();
-    assert.deepEqual(services.map((s) => s.subtype ?? s.type).sort(), ['AccessoryInformation', 'Battery', 'docked', 'leaving', 'mowing', 'returning'].sort());
+    assert.deepEqual(
+      services.map((s) => s.subtype ?? s.type).sort(),
+      ['AccessoryInformation', 'Battery', 'docked', 'leaving', 'mowing', 'returning', 'attention'].sort(),
+    );
     assert.equal(services.find((s) => s.subtype === 'leaving')?.value('ConfiguredName'), 'Mower Leaving');
+    assert.equal(services.find((s) => s.subtype === 'attention')?.value('ConfiguredName'), 'Mower Needs Attention');
   });
 
   test('omits sensors that are switched off in config', () => {
-    const { services } = build({ ...allOn, leaving: false, returning: false, battery: false });
+    const { services } = build({ ...allOn, leaving: false, returning: false, attention: false, battery: false });
     assert.deepEqual(services.map((s) => s.subtype ?? s.type).sort(), ['AccessoryInformation', 'docked', 'mowing'].sort());
   });
 });
@@ -84,11 +90,23 @@ describe('MowerAccessory state pushes', () => {
     mock.timers.reset();
   });
 
+  test('needs-attention opens immediately, without the debounce, and closes when the condition clears', () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { mower, find } = build();
+    mower.update(state());
+    mock.timers.tick(3000);
+    mower.update(state({ attention: true, fault: true }));
+    assert.equal(find(fakeHap.Service.ContactSensor, 'attention')?.value('ContactSensorState'), 1, 'opens on the same push');
+    mower.update(state());
+    assert.equal(find(fakeHap.Service.ContactSensor, 'attention')?.value('ContactSensorState'), 0);
+    mock.timers.reset();
+  });
+
   test('going offline flips StatusActive on every sensor', () => {
     const { mower, services } = build();
     mower.setOnline(false);
     const sensors = services.filter((s) => s.type === 'ContactSensor');
-    assert.equal(sensors.length, 4);
+    assert.equal(sensors.length, 5);
     assert.ok(sensors.every((s) => s.value('StatusActive') === false));
   });
 });

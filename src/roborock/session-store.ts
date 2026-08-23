@@ -21,6 +21,7 @@ export interface StatusDevice {
   fv?: string;
   mowState?: number;
   mowStateName?: string;
+  attention?: string;
   battery?: number;
 }
 

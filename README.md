@@ -14,6 +14,7 @@ Homebridge plugin for Roborock RockMow robot lawn mowers. Exposes your mower to 
 ## Features
 
 - **State sensors** for Home-app automations: Docked, Leaving, Mowing, Returning (each a contact sensor, live via Roborock's cloud push)
+- **Needs Attention** sensor for Home-app notifications when the mower is stuck, faulted, or was stopped with its button
 - **Battery** level, charging state, low-battery flag
 - **Fault indicator** on every sensor when the mower reports an error
 
@@ -29,9 +30,12 @@ Each state is a contact sensor so the Home app can trigger on it ("A Sensor Dete
 | **Leaving** | a job starts (initializing / undocking) | it begins cutting |
 | **Mowing** | it starts cutting or driving to a zone | cutting stops |
 | **Returning** | it heads back to the dock | it reaches the dock |
+| **Needs Attention** | it reports an error, a fault, or its STOP button was pressed | the condition clears |
 
 Example for a dock inside a garage: *Docked opens → open garage*, *Mowing opens → close garage*, *Returning opens → open garage*, *Docked closes → close garage*.
 Prefer **Docked opens** over *Leaving opens* for the departure trigger: both fire on the same push, but Docked can only open once per trip. The mower starts driving ~1.5 s after that push, so if the door needs longer, add a time-based automation on the mowing schedule as well.
+
+**Notifications:** no automation needed — in the Home app open the *Needs Attention* sensor → *Status and Notifications* → turn on *Notify when opens*. It opens on the push that reports the problem (no debounce). Pauses made from the app do not trigger it.
 
 Accessories take the name you gave the mower in the Roborock app (renames follow on the next sync); names you set in the Home app are kept.
 
@@ -61,6 +65,7 @@ Optional fields:
 | Field | Default | Description |
 |---|---|---|
 | `exposeDocked`, `exposeLeaving`, `exposeMowing`, `exposeReturning` | `true` | Which state sensors to create |
+| `exposeAttention` | `true` | Needs Attention sensor (errors, faults, emergency stop) |
 | `exposeBattery` | `true` | Battery service |
 | `faultIndicator` | `true` | Set StatusFault on the sensors when the mower reports an error |
 | `sensorDebounceSeconds` | `3` | How long a state must hold before its sensor flips (0–60) |

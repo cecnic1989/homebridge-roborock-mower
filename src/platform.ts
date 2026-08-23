@@ -2,7 +2,7 @@ import type { API, Characteristic, DynamicPlatformPlugin, Logging, PlatformAcces
 import type mqtt from 'mqtt';
 
 import { MowerAccessory, type SensorOptions } from './mower/accessory.js';
-import { type DerivedState, type Dps, deriveMowerState, describeMowState } from './mower/state.js';
+import { type DerivedState, type Dps, deriveMowerState, describeAttention, describeMowState } from './mower/state.js';
 import { findMowers, type MowerDevice } from './roborock/mower.js';
 import { RoborockMqtt } from './roborock/mqtt-client.js';
 import { type PlatformStatus, readSession, type StatusDevice, writeStatus } from './roborock/session-store.js';
@@ -16,6 +16,7 @@ export interface RoborockMowerConfig extends PlatformConfig {
   exposeLeaving?: boolean;
   exposeMowing?: boolean;
   exposeReturning?: boolean;
+  exposeAttention?: boolean;
   exposeBattery?: boolean;
   faultIndicator?: boolean;
   sensorDebounceSeconds?: number;
@@ -146,6 +147,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       leaving: c.exposeLeaving ?? true,
       mowing: c.exposeMowing ?? true,
       returning: c.exposeReturning ?? true,
+      attention: c.exposeAttention ?? true,
       battery: c.exposeBattery ?? true,
       faultIndicator: c.faultIndicator ?? true,
       debounceSeconds: numberOption(c.sensorDebounceSeconds, 3, 0, 60),
@@ -380,6 +382,11 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     if (state.mowState !== tracked.last?.mowState) {
       this.log.info(`${tracked.device.name}: ${describeMowState(state.mowState)} (battery ${state.battery ?? '?'}%)`);
     }
+    if (state.attention && !tracked.last?.attention) {
+      this.log.warn(`${tracked.device.name}: needs attention — ${describeAttention(state)}`);
+    } else if (!state.attention && tracked.last?.attention) {
+      this.log.info(`${tracked.device.name}: no longer needs attention`);
+    }
     this.log.debug(`${tracked.device.name} ${source} dps: ${JSON.stringify(update)}`);
     tracked.last = state;
     tracked.accessory.update(state);
@@ -395,6 +402,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       fv: tracked.device.fv,
       mowState: tracked.last?.mowState,
       mowStateName: tracked.last ? describeMowState(tracked.last.mowState) : undefined,
+      attention: tracked.last ? describeAttention(tracked.last) : undefined,
       battery: tracked.last?.battery,
     }));
     const status: PlatformStatus = { updatedAt: this.now(), devices, ...(lastError ? { lastError } : {}) };
