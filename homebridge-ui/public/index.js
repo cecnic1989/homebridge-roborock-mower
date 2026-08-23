@@ -42,6 +42,26 @@
     }
   }
 
+  // A freshly installed plugin has no platform block yet; without one Homebridge never starts the platform.
+  let platformBlockUnsaved = false;
+
+  async function ensurePlatformBlock() {
+    const configs = await homebridge.getPluginConfig();
+    if (configs.length > 0) {
+      return;
+    }
+    await homebridge.updatePluginConfig([{ platform: 'RoborockMower' }]);
+    platformBlockUnsaved = true;
+  }
+
+  async function savePlatformBlockIfNew() {
+    if (!platformBlockUnsaved) {
+      return;
+    }
+    await homebridge.savePluginConfig();
+    platformBlockUnsaved = false;
+  }
+
   async function render() {
     let email = null;
     try {
@@ -89,6 +109,7 @@
     try {
       await request('/auth/verify-code', { email: $('email').value.trim(), code, ...pending });
       pending = null;
+      await savePlatformBlockIfNew();
       homebridge.toast.success('Signed in. Restart Homebridge to apply.');
       await render();
     } catch (error) {
@@ -106,6 +127,7 @@
     await render();
   });
 
+  await ensurePlatformBlock();
   homebridge.showSchemaForm();
   await render();
 })();
