@@ -69,8 +69,8 @@ function start(options: StartOptions = {}) {
   }
   emit('didFinishLaunching');
   // The client rate-limits home data (1/s, 3/min, 5/h); each re-sync in tests happens "an hour later".
-  const resync = async () => {
-    clock.now += 3_600_000;
+  const resync = async (advanceMs = 3_600_000) => {
+    clock.now += advanceMs;
     await platform.reconcile();
   };
   return { platform, accessories, calls, client, storagePath, resync, stored };
@@ -202,14 +202,41 @@ describe('RoborockMowerPlatform re-sync', () => {
     assert.equal(removed.find(fakeHap.Service.ContactSensor, 'leaving')?.value('ContactSensorState'), 0);
   });
 
-  test('a cloud snapshot does not overwrite fresher push state while connected', async () => {
+  test('a cloud snapshot does not overwrite push state that is only minutes old', async () => {
     const { platform, accessories, client, resync } = start({ session });
     await platform.whenStarted();
     connect(client);
     push(client, '{"123":51,"127":0}');
-    await resync(); // fixture snapshot says idle/charge-complete
+    await resync(60_000); // fixture snapshot says idle/charge-complete, but the push is 1 min old
     assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'leaving')?.value('ContactSensorState'), 1);
     assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState'), 1);
+  });
+
+  test('every re-sync re-issues the MQTT subscription', async () => {
+    const { platform, client, resync } = start({ session });
+    await platform.whenStarted();
+    connect(client);
+    assert.deepEqual(client.subscriptions, [TOPIC]);
+    await resync();
+    assert.deepEqual(client.subscriptions, [TOPIC, TOPIC]);
+  });
+
+  test('a dead subscription is healed: after an hour of silence a disagreeing snapshot wins and MQTT reconnects', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const { platform, accessories, resync } = start({ session, connectMqtt: connectMqtt as never });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":55,"127":0}'); // mowing... and then the broker silently stops delivering
+    assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'mowing')?.value('ContactSensorState'), 1);
+    await resync(); // an hour later the cloud says idle/charge-complete
+    assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'mowing')?.value('ContactSensorState'), 0, 'snapshot applied');
+    assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState'), 0, 'docked again');
+    assert.equal(clients.length, 2, 'MQTT connection replaced');
   });
 
   test('a rename in the Roborock app propagates to the accessory', async () => {

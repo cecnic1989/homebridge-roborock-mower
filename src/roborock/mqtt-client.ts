@@ -70,8 +70,16 @@ export class RoborockMqtt {
       }
       this.emitConnection(true);
     });
-    client.on('close', () => this.emitConnection(false));
-    client.on('offline', () => this.emitConnection(false));
+    client.on('close', () => {
+      if (this.client === client) {
+        this.emitConnection(false);
+      }
+    });
+    client.on('offline', () => {
+      if (this.client === client) {
+        this.emitConnection(false);
+      }
+    });
     client.on('reconnect', () => this.log.debug('Roborock MQTT reconnecting'));
     client.on('error', (error) => this.log.warn(`Roborock MQTT error: ${error.message}`));
     client.on('message', (topic, payload) => this.onMessage(topic, payload));
@@ -102,6 +110,31 @@ export class RoborockMqtt {
     if (this.subscriptions.delete(duid)) {
       this.client?.unsubscribe(this.topicFor(duid));
     }
+  }
+
+  // The Roborock broker can silently drop a long-lived subscription while the connection still looks healthy.
+  // Re-issuing SUBSCRIBE is idempotent and cheap; a refused suback means the session is broken, so start over.
+  resubscribe(): void {
+    const client = this.client;
+    if (!client?.connected) {
+      return;
+    }
+    for (const duid of this.subscriptions.keys()) {
+      client.subscribe(this.topicFor(duid), { qos: 0 }, (error) => {
+        if (error && this.client === client) {
+          this.log.warn(`Roborock MQTT re-subscribe failed (${error.message}); reconnecting.`);
+          this.restart();
+        }
+      });
+    }
+  }
+
+  // Tear the connection down and build a fresh one; late events from the replaced client are ignored.
+  restart(): void {
+    const old = this.client;
+    this.client = undefined;
+    old?.end(true);
+    this.start();
   }
 
   onConnectionChange(listener: (connected: boolean) => void): void {

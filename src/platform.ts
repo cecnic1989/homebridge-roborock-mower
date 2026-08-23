@@ -60,6 +60,7 @@ const MIN_POLL_SECONDS = 900; // Roborock rate-limits home data; python-roborock
 const MAX_POLL_SECONDS = 86_400;
 const DEFAULT_POLL_SECONDS = 3600;
 const STARTUP_RETRY_MS = 5 * 60_000;
+const STALE_PUSH_MS = 5 * 60_000; // a push this old no longer outranks a disagreeing cloud snapshot
 const SESSION_EXPIRED = 'session-expired';
 
 function message(error: unknown): string {
@@ -78,6 +79,10 @@ function numberOption(value: unknown, fallback: number, min: number, max: number
 function toCached(device: MowerDevice): CachedDevice {
   const { duid, name, model, productName, localKey, sn, fv, pv } = device;
   return { duid, name, model, productName, localKey, sn, fv, pv };
+}
+
+function toNumericDps(update: Record<string | number, unknown>): Dps {
+  return Object.fromEntries(Object.entries(update).map(([key, value]) => [Number(key), value]));
 }
 
 function isSessionExpired(error: unknown): boolean {
@@ -134,6 +139,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
 
   // Safety net only: re-reads home data so a missed push, a rename, or a new device is picked up eventually.
   async reconcile(): Promise<void> {
+    this.mqtt?.resubscribe(); // heals a subscription the broker silently dropped
     if (this.sessionExpiredLogged) {
       await this.adoptNewSession();
     }
@@ -315,6 +321,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     }
 
     const seen = new Set<string>();
+    let staleSubscription = false;
     for (const device of devices) {
       seen.add(device.duid);
       const cached = toCached(device);
@@ -344,10 +351,18 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       }
       this.api.updatePlatformAccessories([tracked.platformAccessory]);
 
-      // The cloud snapshot can lag the live pushes; only use it when we have nothing fresher.
+      // The cloud snapshot can lag the live pushes; only use it when we have nothing fresher. But a push that is
+      // old AND contradicted by the cloud means the subscription silently died — then the snapshot is the truth.
       const connected = this.mqtt?.connected ?? false;
+      const pushAge = tracked.lastPushAt === undefined ? Infinity : this.now() - tracked.lastPushAt;
+      const snapshotMowState = deriveMowerState(toNumericDps(device.deviceStatus ?? {})).mowState;
       if (tracked.lastPushAt === undefined || !connected) {
         this.applyDps(tracked, device.deviceStatus ?? {}, 'cloud');
+      } else if (pushAge > STALE_PUSH_MS && snapshotMowState !== tracked.last?.mowState) {
+        this.log.warn(`${device.name}: no live update for ${Math.round(pushAge / 60_000)} min and the cloud disagrees; `
+          + 'applying the cloud snapshot and reconnecting MQTT.');
+        this.applyDps(tracked, device.deviceStatus ?? {}, 'cloud');
+        staleSubscription = true;
       } else {
         this.log.debug(`${device.name}: cloud snapshot ignored in favour of live state: ${JSON.stringify(device.deviceStatus)}`);
       }
@@ -359,6 +374,9 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       if (!seen.has(tracked.device.duid)) {
         this.remove(tracked);
       }
+    }
+    if (staleSubscription) {
+      this.mqtt?.restart();
     }
   }
 
@@ -372,9 +390,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
   }
 
   private applyDps(tracked: TrackedMower, update: Record<string | number, unknown>, source: 'push' | 'cloud'): void {
-    for (const [key, value] of Object.entries(update)) {
-      tracked.dps[Number(key)] = value;
-    }
+    Object.assign(tracked.dps, toNumericDps(update));
     if (source === 'push') {
       tracked.lastPushAt = this.now();
     }
