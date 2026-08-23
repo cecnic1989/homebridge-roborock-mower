@@ -2,7 +2,7 @@
   "name": "@cecnic1989/homebridge-roborock-mower",
   "displayName": "Homebridge Roborock Mower",
   "type": "module",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Homebridge plugin for Roborock RockMow robot lawn mowers",
   "author": "cecnic1989",
   "license": "Apache-2.0",
