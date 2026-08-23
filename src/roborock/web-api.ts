@@ -1,4 +1,5 @@
 import { hawkAuthorization, headerClientId, randomAlphanumeric } from './crypto.js';
+import { HOME_DATA_LIMITS, LOGIN_LIMITS, RateLimiter } from './rate-limiter.js';
 import { type HomeData, type RegionInfo, RoborockApiError, type UserData } from './types.js';
 
 export const BASE_URLS = [
@@ -77,7 +78,10 @@ export class RoborockWebApi {
   private readonly fetch: typeof globalThis.fetch;
   private readonly now: () => number;
   private readonly timeoutMs: number;
+  private readonly loginLimiter: RateLimiter;
+  private readonly homeDataLimiter: RateLimiter;
   private candidates = [...BASE_URLS];
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: RoborockWebApiOptions) {
     this.email = options.email;
@@ -86,6 +90,21 @@ export class RoborockWebApi {
     this.fetch = options.fetch ?? globalThis.fetch;
     this.now = options.now ?? (() => Date.now());
     this.timeoutMs = options.timeoutMs ?? 20_000;
+    this.loginLimiter = new RateLimiter(LOGIN_LIMITS, this.now);
+    this.homeDataLimiter = new RateLimiter(HOME_DATA_LIMITS, this.now);
+  }
+
+  // All cloud calls go through one lane: Roborock tolerates little concurrency and we share the account with the app.
+  private serialize<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(run, run);
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private acquire(limiter: RateLimiter, what: string): void {
+    if (!limiter.tryAcquire()) {
+      throw new RoborockApiError(`Roborock ${what} rate limit reached; try again later.`, 429);
+    }
   }
 
   // Asks each regional host whether it knows the account; the answer also carries the country values the login needs.
@@ -112,7 +131,15 @@ export class RoborockWebApi {
     throw new RoborockApiError('Could not find a Roborock region for this account. Check the email address.');
   }
 
-  async requestEmailCode(): Promise<RegionInfo> {
+  requestEmailCode(): Promise<RegionInfo> {
+    return this.serialize(() => {
+      this.acquire(this.loginLimiter, 'login');
+      return this.requestEmailCodeNow();
+    });
+  }
+
+  // Region fallback (3030) retries internally; the limiter is charged once per user action, in requestEmailCode().
+  private async requestEmailCodeNow(): Promise<RegionInfo> {
     const region = this.region ?? await this.resolveRegion();
     const envelope = await this.postForm(
       new URL('/api/v4/email/code/send', region.baseUrl),
@@ -122,13 +149,20 @@ export class RoborockWebApi {
     if (envelope.code === 3030 && this.candidates.length > 1) {
       this.candidates = this.candidates.filter((base) => base !== region.baseUrl);
       this.region = undefined;
-      return this.requestEmailCode();
+      return this.requestEmailCodeNow();
     }
     ensureOk(envelope);
     return region;
   }
 
-  async loginWithCode(code: string): Promise<UserData> {
+  loginWithCode(code: string): Promise<UserData> {
+    return this.serialize(() => {
+      this.acquire(this.loginLimiter, 'login');
+      return this.loginWithCodeNow(code);
+    });
+  }
+
+  private async loginWithCodeNow(code: string): Promise<UserData> {
     const region = this.region ?? await this.resolveRegion();
     const s = randomAlphanumeric(16);
     const signUrl = new URL('/api/v3/key/sign', region.baseUrl);
@@ -152,7 +186,11 @@ export class RoborockWebApi {
     return userData;
   }
 
-  async getHomeId(userData: UserData): Promise<number> {
+  getHomeId(userData: UserData): Promise<number> {
+    return this.serialize(() => this.getHomeIdNow(userData));
+  }
+
+  private async getHomeIdNow(userData: UserData): Promise<number> {
     const region = this.region ?? await this.resolveRegion();
     const envelope = await this.call(new URL('/api/v1/getHomeDetail', region.baseUrl), {
       headers: { ...this.loginHeaders(), Authorization: userData.token },
@@ -165,7 +203,12 @@ export class RoborockWebApi {
     return homeId;
   }
 
-  async getHomeData(userData: UserData, homeId: number): Promise<HomeData> {
+  getHomeData(userData: UserData, homeId: number): Promise<HomeData> {
+    return this.serialize(() => this.getHomeDataNow(userData, homeId));
+  }
+
+  private async getHomeDataNow(userData: UserData, homeId: number): Promise<HomeData> {
+    this.acquire(this.homeDataLimiter, 'home-data');
     const host = userData.rriot.r.a;
     if (!host) {
       throw new RoborockApiError('Session is missing the Roborock API host (rriot.r.a).');

@@ -5,7 +5,7 @@ export interface RecordedRequest {
   body: string;
 }
 
-type Reply = object | Response | ((req: RecordedRequest) => object | Response);
+type Reply = object | Response | ((req: RecordedRequest) => object | Response | Promise<object | Response>);
 
 // Routes are matched by URL pathname. A route value is the JSON envelope to return, a full Response, or a function of the request.
 export function fakeFetch(routes: Record<string, Reply>) {
@@ -19,7 +19,7 @@ export function fakeFetch(routes: Record<string, Reply>) {
     if (route === undefined) {
       return new Response('not found', { status: 404 });
     }
-    const reply = typeof route === 'function' ? route(req) : route;
+    const reply = typeof route === 'function' ? await route(req) : route;
     return reply instanceof Response ? reply : Response.json(reply);
   };
   return { fetch: fetch as unknown as typeof globalThis.fetch, calls };
