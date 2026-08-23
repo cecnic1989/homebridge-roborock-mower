@@ -30,8 +30,10 @@ Each state is a contact sensor so the Home app can trigger on it ("A Sensor Dete
 | **Mowing** | it starts cutting or driving to a zone | cutting stops |
 | **Returning** | it heads back to the dock | it reaches the dock |
 
-Example for a dock inside a garage: *Leaving opens → open garage*, *Mowing opens → close garage*, *Returning opens → open garage*, *Docked closes → close garage*.
-Note: the mower starts driving ~1.5 s after "Leaving" opens, so for the outbound trip pair it with a time-based automation on the mowing schedule if the door needs longer.
+Example for a dock inside a garage: *Docked opens → open garage*, *Mowing opens → close garage*, *Returning opens → open garage*, *Docked closes → close garage*.
+Prefer **Docked opens** over *Leaving opens* for the departure trigger: both fire on the same push, but Docked can only open once per trip. The mower starts driving ~1.5 s after that push, so if the door needs longer, add a time-based automation on the mowing schedule as well.
+
+Accessories take the name you gave the mower in the Roborock app (renames follow on the next sync); names you set in the Home app are kept.
 
 Sensors flip only after a state holds for `sensorDebounceSeconds` (default 3 s); faults and battery update immediately. While the cloud connection is down, sensors show as inactive rather than stale.
 
