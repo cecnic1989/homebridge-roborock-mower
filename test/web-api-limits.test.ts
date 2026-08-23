@@ -44,3 +44,15 @@ describe('RoborockWebApi request discipline', () => {
     assert.equal(calls.length, 5);
   });
 });
+
+describe('resolveRegion diagnostics', () => {
+  test('distinguishes "no host reachable" from "no host knows the account"', async () => {
+    const unreachable = async () => {
+      throw new Error('ENOTFOUND');
+    };
+    const down = new RoborockWebApi({ email: 'e', clientId: 'c', fetch: unreachable as never });
+    await assert.rejects(down.resolveRegion(), /reach/i);
+    const { fetch } = fakeFetch({ '/api/v1/getUrlByEmail': { code: 3039 } });
+    await assert.rejects(new RoborockWebApi({ email: 'e', clientId: 'c', fetch }).resolveRegion(), /email/i);
+  });
+});

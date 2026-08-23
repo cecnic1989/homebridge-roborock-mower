@@ -109,6 +109,7 @@ export class RoborockWebApi {
 
   // Asks each regional host whether it knows the account; the answer also carries the country values the login needs.
   async resolveRegion(): Promise<RegionInfo> {
+    let unreachable = 0;
     for (const baseUrl of this.candidates) {
       const url = new URL('/api/v1/getUrlByEmail', baseUrl);
       url.searchParams.set('email', this.email);
@@ -117,6 +118,7 @@ export class RoborockWebApi {
       try {
         envelope = await this.call(url, { method: 'POST', headers: this.loginHeaders() });
       } catch {
+        unreachable++;
         continue;
       }
       if (envelope.code === 2003 || envelope.code === 1001) {
@@ -127,6 +129,9 @@ export class RoborockWebApi {
         this.region = { baseUrl: data.url, country: data.country ?? '', countryCode: String(data.countrycode ?? '') };
         return this.region;
       }
+    }
+    if (unreachable === this.candidates.length) {
+      throw new RoborockApiError('Could not reach the Roborock servers (network or DNS). Check connectivity and try again.');
     }
     throw new RoborockApiError('Could not find a Roborock region for this account. Check the email address.');
   }
