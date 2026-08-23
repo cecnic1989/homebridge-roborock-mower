@@ -1,0 +1,13 @@
+[
+  { "at": 0.0, "dps": { "132": 1 }, "note": "app start" },
+  { "at": 1.2, "dps": { "123": 51, "127": 0 }, "note": "mow_initializing, not charging" },
+  { "at": 2.6, "dps": { "123": 52 }, "note": "undocking" },
+  { "at": 12.5, "dps": { "123": 51 }, "note": "re-initializing after undock" },
+  { "at": 19.5, "dps": { "122": 2 }, "note": "mow_type edge_cut" },
+  { "at": 21.1, "dps": { "139": 0, "123": 57 }, "note": "mow_goto" },
+  { "at": 24.5, "dps": { "129": 1 }, "note": "charge_type manual dock (user tapped Return)" },
+  { "at": 25.8, "dps": { "122": 0, "123": 0, "132": 0 }, "note": "task ended, idle" },
+  { "at": 26.4, "dps": { "143": 104 }, "note": "off-dock returning" },
+  { "at": 39.9, "dps": { "129": 0 }, "note": "" },
+  { "at": 41.4, "dps": { "127": 2, "143": 0 }, "note": "docked, charge completed" }
+]
