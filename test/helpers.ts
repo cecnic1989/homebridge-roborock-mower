@@ -19,6 +19,7 @@ export interface FakeApi {
   api: API;
   registered: { name: string; ctor: unknown }[];
   accessories: FakePlatformAccessory[];
+  storagePath: string;
   emit: (event: string) => void;
 }
 
@@ -35,12 +36,15 @@ export function fakeApi(storagePath = mkdtempSync(join(tmpdir(), 'rr-'))): FakeA
     registerPlatformAccessories: (_p: string, _n: string, list: PlatformAccessory[]) => accessories.push(...(list as unknown as FakePlatformAccessory[])),
     unregisterPlatformAccessories: (_p: string, _n: string, list: PlatformAccessory[]) => {
       for (const item of list) {
-        accessories.splice(accessories.indexOf(item as unknown as FakePlatformAccessory), 1);
+        const index = accessories.indexOf(item as unknown as FakePlatformAccessory);
+        if (index >= 0) {
+          accessories.splice(index, 1);
+        }
       }
     },
     updatePlatformAccessories: () => {},
     on: (event: string, cb: () => void) => listeners.set(event, [...(listeners.get(event) ?? []), cb]),
   } as unknown as API;
   const emit = (event: string) => (listeners.get(event) ?? []).forEach((cb) => cb());
-  return { api, registered, accessories, emit };
+  return { api, registered, accessories, storagePath, emit };
 }
