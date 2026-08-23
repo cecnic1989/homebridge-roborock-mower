@@ -1,0 +1,66 @@
+{
+  "id": 1234567,
+  "name": "Home",
+  "products": [
+    {
+      "id": "2NCYGq2avnPyRy8DX8lcbt",
+      "name": "RockMow Z1 LiDAR",
+      "model": "roborock.mower.a282",
+      "category": "roborock.mower"
+    },
+    {
+      "id": "prod-vacuum",
+      "name": "Roborock S8",
+      "model": "roborock.vacuum.a70",
+      "category": "robot.vacuum.cleaner"
+    }
+  ],
+  "devices": [
+    {
+      "duid": "mower-duid",
+      "name": "RockMow X120H LiDAR",
+      "activeTime": 1787331470,
+      "createTime": 1787331470,
+      "timeZoneId": "America/New_York",
+      "productId": "2NCYGq2avnPyRy8DX8lcbt",
+      "online": true,
+      "fv": "02.23.10",
+      "pv": "1.0",
+      "sn": "SN000000",
+      "localKey": "localkey",
+      "featureSet": "0",
+      "newFeatureSet": "00000015F581BFDE",
+      "deviceStatus": {
+        "121": 100,
+        "122": 0,
+        "123": 0,
+        "124": 4,
+        "125": 0,
+        "126": 0,
+        "127": 2,
+        "129": 0,
+        "132": 0,
+        "133": 1,
+        "134": 90,
+        "135": 150,
+        "138": 0,
+        "139": 100,
+        "142": "gps-blob",
+        "143": 0,
+        "144": 0,
+        "145": 1
+      }
+    }
+  ],
+  "receivedDevices": [
+    {
+      "duid": "vacuum-duid",
+      "name": "Shared vacuum",
+      "productId": "prod-vacuum",
+      "online": true,
+      "pv": "1.0",
+      "deviceStatus": {}
+    }
+  ],
+  "rooms": []
+}
