@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { StoredSession } from './types.js';
@@ -6,6 +6,29 @@ import type { StoredSession } from './types.js';
 // Lives outside config.json so the Homebridge UI's schema form can never overwrite it.
 export function sessionPath(storagePath: string): string {
   return join(storagePath, 'roborock-mower', 'session.json');
+}
+
+export function statusPath(storagePath: string): string {
+  return join(storagePath, 'roborock-mower', 'status.json');
+}
+
+export interface StatusDevice {
+  duid: string;
+  name: string;
+  model: string;
+  productName?: string;
+  online: boolean;
+  fv?: string;
+  mowState?: number;
+  mowStateName?: string;
+  battery?: number;
+}
+
+// Written by the platform after each cloud sync; read by the settings page so it never needs the cloud itself.
+export interface PlatformStatus {
+  updatedAt: number;
+  devices: StatusDevice[];
+  lastError?: string;
 }
 
 function isSession(value: unknown): value is StoredSession {
@@ -17,28 +40,52 @@ function isSession(value: unknown): value is StoredSession {
     && typeof candidate.userData.rriot === 'object';
 }
 
-export async function readSession(storagePath: string): Promise<StoredSession | undefined> {
+async function readJson(path: string): Promise<unknown> {
   let raw: string;
   try {
-    raw = await readFile(sessionPath(storagePath), 'utf8');
+    raw = await readFile(path, 'utf8');
   } catch {
     return undefined;
   }
   try {
-    const parsed: unknown = JSON.parse(raw);
-    return isSession(parsed) ? parsed : undefined;
+    return JSON.parse(raw);
   } catch {
     return undefined;
   }
 }
 
-export async function writeSession(storagePath: string, session: StoredSession): Promise<void> {
-  const path = sessionPath(storagePath);
+// Write to a sibling temp file and rename so a crash mid-write never leaves a truncated file behind.
+async function writeFileAtomic(path: string, data: string, mode: number): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(session, null, 2), { mode: 0o600 });
-  await chmod(path, 0o600);
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    await writeFile(tmp, data, { mode });
+    await chmod(tmp, mode);
+    await rename(tmp, path);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function readSession(storagePath: string): Promise<StoredSession | undefined> {
+  const parsed = await readJson(sessionPath(storagePath));
+  return isSession(parsed) ? parsed : undefined;
+}
+
+export async function writeSession(storagePath: string, session: StoredSession): Promise<void> {
+  await writeFileAtomic(sessionPath(storagePath), JSON.stringify(session, null, 2), 0o600);
 }
 
 export async function clearSession(storagePath: string): Promise<void> {
   await rm(sessionPath(storagePath), { force: true });
+}
+
+export async function readStatus(storagePath: string): Promise<PlatformStatus | undefined> {
+  const parsed = await readJson(statusPath(storagePath)) as Partial<PlatformStatus> | undefined;
+  return typeof parsed?.updatedAt === 'number' && Array.isArray(parsed.devices) ? parsed as PlatformStatus : undefined;
+}
+
+export async function writeStatus(storagePath: string, status: PlatformStatus): Promise<void> {
+  await writeFileAtomic(statusPath(storagePath), JSON.stringify(status, null, 2), 0o600);
 }

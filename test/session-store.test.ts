@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
 
-import { clearSession, readSession, sessionPath, writeSession } from '../src/roborock/session-store.js';
+import { clearSession, readSession, readStatus, sessionPath, writeSession, writeStatus } from '../src/roborock/session-store.js';
 import type { StoredSession } from '../src/roborock/types.js';
 
 const session: StoredSession = {
@@ -38,5 +38,31 @@ describe('session store', () => {
     await clearSession(dir);
     await assert.rejects(readFile(sessionPath(dir)));
     await clearSession(dir);
+  });
+});
+
+describe('atomic writes', () => {
+  test('leaves no temp file behind and keeps the previous session when the new write cannot complete', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rr-'));
+    await writeSession(dir, session);
+    const folder = dirname(sessionPath(dir));
+    assert.deepEqual((await readdir(folder)).filter((f) => f.includes('tmp')), []);
+    await chmod(folder, 0o500);
+    try {
+      await assert.rejects(writeSession(dir, { ...session, email: 'new@example.com' }));
+      assert.equal((await readSession(dir))?.email, 'user@example.com');
+    } finally {
+      await chmod(folder, 0o700);
+    }
+  });
+});
+
+describe('status file', () => {
+  test('round-trips the platform status and reads as undefined when absent', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rr-'));
+    assert.equal(await readStatus(dir), undefined);
+    const status = { updatedAt: 1700000000000, devices: [{ duid: 'd', name: 'Mower', model: 'roborock.mower.a282', online: true }] };
+    await writeStatus(dir, status);
+    assert.deepEqual(await readStatus(dir), status);
   });
 });
