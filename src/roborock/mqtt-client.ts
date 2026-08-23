@@ -35,11 +35,16 @@ interface Subscription {
   onDps: DpsListener;
 }
 
+const RESUBSCRIBE_INTERVAL_MS = 15 * 60_000; // the broker can silently drop a subscription; SUBSCRIBE is idempotent
+const REFUSAL_RESTART_COOLDOWN_MS = 60_000; // a broker that keeps refusing must not spin us into a restart loop
+
 export class RoborockMqtt {
   private client?: MqttClient;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly connectionListeners: ((connected: boolean) => void)[] = [];
   private lastConnected = false;
+  private resubscribeTimer?: NodeJS.Timeout;
+  private lastRefusalRestart = 0;
 
   constructor(
     private readonly rriot: RRiot,
@@ -83,6 +88,8 @@ export class RoborockMqtt {
     client.on('reconnect', () => this.log.debug('Roborock MQTT reconnecting'));
     client.on('error', (error) => this.log.warn(`Roborock MQTT error: ${error.message}`));
     client.on('message', (topic, payload) => this.onMessage(topic, payload));
+    this.resubscribeTimer = setInterval(() => this.resubscribe(), RESUBSCRIBE_INTERVAL_MS);
+    this.resubscribeTimer.unref?.();
   }
 
   get connected(): boolean {
@@ -96,6 +103,7 @@ export class RoborockMqtt {
     const client = this.client;
     this.client = undefined;
     this.lastConnected = false;
+    clearInterval(this.resubscribeTimer);
     client?.end(true);
   }
 
@@ -112,28 +120,24 @@ export class RoborockMqtt {
     }
   }
 
-  // The Roborock broker can silently drop a long-lived subscription while the connection still looks healthy.
-  // Re-issuing SUBSCRIBE is idempotent and cheap; a refused suback means the session is broken, so start over.
+  // Re-issue every SUBSCRIBE — idempotent, cheap, and heals a subscription the broker silently dropped.
   resubscribe(): void {
-    const client = this.client;
-    if (!client?.connected) {
+    if (!this.client?.connected) {
       return;
     }
     for (const duid of this.subscriptions.keys()) {
-      client.subscribe(this.topicFor(duid), { qos: 0 }, (error) => {
-        if (error && this.client === client) {
-          this.log.warn(`Roborock MQTT re-subscribe failed (${error.message}); reconnecting.`);
-          this.restart();
-        }
-      });
+      this.subscribeTopic(duid);
     }
   }
 
-  // Tear the connection down and build a fresh one; late events from the replaced client are ignored.
+  // Tear the connection down and build a fresh one. Listeners hear the drop immediately — the old sensors must
+  // not look live while the replacement is still connecting; late events from the replaced client are ignored.
   restart(): void {
     const old = this.client;
     this.client = undefined;
+    clearInterval(this.resubscribeTimer);
     old?.end(true);
+    this.emitConnection(false);
     this.start();
   }
 
@@ -145,10 +149,18 @@ export class RoborockMqtt {
     return `rr/m/o/${this.rriot.u}/${mqttCredentials(this.rriot).username}/${duid}`;
   }
 
+  // A refused suback means the session is broken (the broker acknowledged the request and said no), so a fresh
+  // connection is the only repair — but never more than once a minute, in case the refusal is persistent.
   private subscribeTopic(duid: string): void {
-    this.client?.subscribe(this.topicFor(duid), { qos: 0 }, (error) => {
-      if (error) {
-        this.log.warn(`Roborock MQTT subscribe failed for ${duid}: ${error.message}`);
+    const client = this.client;
+    client?.subscribe(this.topicFor(duid), { qos: 0 }, (error) => {
+      if (!error || this.client !== client) {
+        return;
+      }
+      this.log.warn(`Roborock MQTT subscribe failed for ${duid}: ${error.message}`);
+      if (Date.now() - this.lastRefusalRestart >= REFUSAL_RESTART_COOLDOWN_MS) {
+        this.lastRefusalRestart = Date.now();
+        this.restart();
       }
     });
   }

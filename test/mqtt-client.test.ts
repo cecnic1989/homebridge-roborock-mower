@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { describe, test } from 'node:test';
+import { describe, mock, test } from 'node:test';
 
 import { mqttCredentials, RoborockMqtt } from '../src/roborock/mqtt-client.js';
 import { silentLog } from './helpers.js';
@@ -81,6 +81,39 @@ describe('RoborockMqtt connection events', () => {
     assert.deepEqual(clients[1].subscribed, clients[0].subscribed.slice(0, 1), 'the new session subscribes the same topic');
   });
 
+  test('a refused subscribe at connect time also restarts, but repeated refusals do not spin', () => {
+    const clients: FakeClient[] = [];
+    const connect = () => {
+      const c = new FakeClient();
+      c.failSubscribe = true;
+      clients.push(c);
+      return c;
+    };
+    const mqtt = new RoborockMqtt(rriot, silentLog, (connect as unknown) as never);
+    mqtt.subscribe('duid-1', 'key', () => {});
+    mqtt.start();
+    clients[0].connected = true;
+    clients[0].emit('connect'); // suback refused right at connect
+    assert.equal(clients.length, 2, 'refusal at connect is the same broken session');
+    clients[1].connected = true;
+    clients[1].emit('connect'); // refused again straight away
+    assert.equal(clients.length, 2, 'a second refusal within the cooldown must not spin restarts');
+  });
+
+  test('a live connection re-subscribes on its own timer, without any cloud traffic', () => {
+    mock.timers.enable({ apis: ['setInterval'] });
+    const client = new FakeClient();
+    const mqtt = new RoborockMqtt(rriot, silentLog, ((() => client) as unknown) as never);
+    mqtt.subscribe('duid-1', 'key', () => {});
+    mqtt.start();
+    client.connected = true;
+    client.emit('connect');
+    const after = client.subscribed.length;
+    mock.timers.tick(15 * 60_000);
+    assert.equal(client.subscribed.length, after + 1);
+    mock.timers.reset();
+  });
+
   test('restart() replaces the connection and a late close from the old client is ignored', () => {
     const clients: FakeClient[] = [];
     const connect = () => {
@@ -96,10 +129,11 @@ describe('RoborockMqtt connection events', () => {
     clients[0].emit('connect');
     mqtt.restart();
     assert.equal(clients[0].ended, true);
+    assert.deepEqual(seen, [true, false], 'listeners hear the drop while the replacement is still connecting');
     clients[1].connected = true;
     clients[1].emit('connect');
     clients[0].emit('close'); // the old socket dies after the new one is already up
-    assert.deepEqual(seen, [true], 'no false disconnect from the replaced client');
+    assert.deepEqual(seen, [true, false, true], 'and no extra disconnect from the replaced client');
   });
 
   test('stop() leaves mqtt.js internal listeners in place and absorbs a late error', () => {

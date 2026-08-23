@@ -351,20 +351,23 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       }
       this.api.updatePlatformAccessories([tracked.platformAccessory]);
 
-      // The cloud snapshot can lag the live pushes; only use it when we have nothing fresher. But a push that is
-      // old AND contradicted by the cloud means the subscription silently died — then the snapshot is the truth.
-      const connected = this.mqtt?.connected ?? false;
+      // A push fresher than STALE_PUSH_MS always beats the snapshot, whatever the connection looks like.
+      // An older push has aged out: merge the snapshot (battery, charge, errors heal too). Only when both sides
+      // carry a definite state AND they contradict each other on a live connection is the subscription presumed
+      // dead — that is what a silent broker drop looks like from here.
       const pushAge = tracked.lastPushAt === undefined ? Infinity : this.now() - tracked.lastPushAt;
-      const snapshotMowState = deriveMowerState(toNumericDps(device.deviceStatus ?? {})).mowState;
-      if (tracked.lastPushAt === undefined || !connected) {
+      if (pushAge > STALE_PUSH_MS) {
+        const snapshotMowState = deriveMowerState(toNumericDps(device.deviceStatus ?? {})).mowState;
+        const pushMowState = tracked.last?.mowState;
+        if (snapshotMowState !== undefined && pushMowState !== undefined && snapshotMowState !== pushMowState
+          && (this.mqtt?.connected ?? false)) {
+          this.log.warn(`${device.name}: no live update for ${Math.round(pushAge / 60_000)} min and the cloud disagrees; `
+            + 'applying the cloud snapshot and reconnecting MQTT.');
+          staleSubscription = true;
+        }
         this.applyDps(tracked, device.deviceStatus ?? {}, 'cloud');
-      } else if (pushAge > STALE_PUSH_MS && snapshotMowState !== tracked.last?.mowState) {
-        this.log.warn(`${device.name}: no live update for ${Math.round(pushAge / 60_000)} min and the cloud disagrees; `
-          + 'applying the cloud snapshot and reconnecting MQTT.');
-        this.applyDps(tracked, device.deviceStatus ?? {}, 'cloud');
-        staleSubscription = true;
       } else {
-        this.log.debug(`${device.name}: cloud snapshot ignored in favour of live state: ${JSON.stringify(device.deviceStatus)}`);
+        this.log.debug(`${device.name}: cloud snapshot ignored in favour of fresh live state: ${JSON.stringify(device.deviceStatus)}`);
       }
       tracked.online = device.online !== false;
       tracked.accessory.setOnline(tracked.online && this.live);

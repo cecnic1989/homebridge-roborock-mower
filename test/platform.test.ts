@@ -212,6 +212,49 @@ describe('RoborockMowerPlatform re-sync', () => {
     assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState'), 1);
   });
 
+  test('a delta-only push history is not "disagreement": the snapshot is merged but MQTT is left alone', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const { platform, accessories, resync } = start({ session, connectMqtt: connectMqtt as never });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"121":97}'); // a push that never carried DPS 123
+    await resync();
+    assert.equal(clients.length, 1, 'no restart: neither side proved a different state');
+    assert.equal(accessories[0].find(fakeHap.Service.Battery)?.value('BatteryLevel'), 100, 'snapshot still merged');
+  });
+
+  test('a stale push that agrees on state still gets the snapshot merged, without a restart', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const { platform, accessories, resync } = start({ session, connectMqtt: connectMqtt as never });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":0,"121":50}'); // idle at 50%, then hours of silence
+    await resync(); // fixture snapshot: idle at 100%
+    assert.equal(accessories[0].find(fakeHap.Service.Battery)?.value('BatteryLevel'), 100, 'battery healed from the cloud');
+    assert.equal(clients.length, 1, 'agreement is not evidence of a dead subscription');
+  });
+
+  test('a broker outage during re-sync does not let the snapshot beat a minute-old push', async () => {
+    const { platform, accessories, client, resync } = start({ session });
+    await platform.whenStarted();
+    connect(client);
+    push(client, '{"123":51,"127":0}');
+    client.connected = false;
+    client.emit('close'); // reconnecting right as the re-sync runs
+    await resync(60_000);
+    assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'leaving')?.value('ContactSensorState'), 1);
+  });
+
   test('every re-sync re-issues the MQTT subscription', async () => {
     const { platform, client, resync } = start({ session });
     await platform.whenStarted();

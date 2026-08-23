@@ -6,8 +6,9 @@ import { readFile } from 'node:fs/promises';
 import mqtt from 'mqtt';
 
 import { buildV1Frame } from '../test/frame-builder.js';
-import { md5hex, randomAlphanumeric } from '../src/roborock/crypto.js';
+import { randomAlphanumeric } from '../src/roborock/crypto.js';
 import { findMowers } from '../src/roborock/mower.js';
+import { mqttCredentials } from '../src/roborock/mqtt-client.js';
 import type { StoredSession } from '../src/roborock/types.js';
 import { decodeFrames } from '../src/roborock/v1-protocol.js';
 import { RoborockWebApi } from '../src/roborock/web-api.js';
@@ -33,11 +34,9 @@ if (!mower?.localKey) {
 const localKey = mower.localKey;
 console.log(`[${new Date().toISOString()}] ${mower.name} online=${mower.online} status=${JSON.stringify(mower.deviceStatus)}`);
 
-const { u, s, k, r } = session.userData.rriot;
-const user = md5hex(`${u}:${k}`).slice(2, 10);
-const password = md5hex(`${s}:${k}`).slice(16);
-const outTopic = `rr/m/o/${u}/${user}/${mower.duid}`;
-const inTopic = `rr/m/i/${u}/${user}/${mower.duid}`;
+const { url, username, password } = mqttCredentials(session.userData.rriot);
+const outTopic = `rr/m/o/${session.userData.rriot.u}/${username}/${mower.duid}`;
+const inTopic = `rr/m/i/${session.userData.rriot.u}/${username}/${mower.duid}`;
 
 // Request: dps.101 carries the JSON-encoded RPC; params is the RemoteMsg in protobufjs toJSON form (string enum names).
 const requestId = 10_000 + Math.floor(Math.random() * 22_767);
@@ -55,7 +54,9 @@ if (dryRun) {
 
 const started = Date.now();
 const rel = () => `+${((Date.now() - started) / 1000).toFixed(1)}s`;
-const client = mqtt.connect(r.m!, { clientId: `${user}-${randomAlphanumeric(6)}`, username: user, password, keepalive: 30, clean: true });
+// reconnectPeriod 0: an auto-reconnect would re-run the connect handler and send the physical command again.
+const client = mqtt.connect(url, { clientId: `${username}-${randomAlphanumeric(6)}`, username, password, keepalive: 30, clean: true, reconnectPeriod: 0 });
+let published = false;
 
 client.on('connect', () => {
   console.log(`${rel()} connected`);
@@ -64,6 +65,10 @@ client.on('connect', () => {
       console.log(`subscribe error ${err.message}`);
       return;
     }
+    if (published) {
+      return; // never send a mow/dock command twice
+    }
+    published = true;
     console.log(`${rel()} subscribed; publishing ${button}`);
     client.publish(inTopic, frame, { qos: 0 }, (pubErr) => console.log(pubErr ? `publish error ${pubErr.message}` : `${rel()} published`));
   });
@@ -82,7 +87,13 @@ client.on('message', (_topic, buf) => {
     }
     const rpcReply = parsed?.dps?.['102'];
     if (typeof rpcReply === 'string') {
-      console.log(`${rel()} RPC reply: ${rpcReply}${rpcReply.includes(`"id":${requestId}`) ? '   <-- ours' : ''}`);
+      let replyId: unknown;
+      try {
+        replyId = (JSON.parse(rpcReply) as { id?: unknown }).id;
+      } catch {
+        replyId = undefined;
+      }
+      console.log(`${rel()} RPC reply: ${rpcReply}${replyId === requestId ? '   <-- ours' : ''}`);
     } else {
       console.log(`${rel()} proto=${f.protocol} ${text}`);
     }
