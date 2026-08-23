@@ -9,16 +9,76 @@
     "type": "object",
     "properties": {
       "pollInterval": {
-        "title": "Poll Interval (seconds)",
+        "title": "Cloud refresh interval (seconds)",
         "type": "integer",
-        "default": 60,
-        "minimum": 15,
-        "maximum": 3600,
-        "description": "How often to poll mower status"
+        "default": 3600,
+        "minimum": 900,
+        "maximum": 86400,
+        "description": "Live state arrives by push; this only re-syncs with the Roborock cloud as a safety net. Roborock limits this call, keep it at an hour or more."
+      },
+      "exposeDocked": {
+        "title": "Docked sensor",
+        "type": "boolean",
+        "default": true
+      },
+      "exposeLeaving": {
+        "title": "Leaving sensor",
+        "type": "boolean",
+        "default": true
+      },
+      "exposeMowing": {
+        "title": "Mowing sensor",
+        "type": "boolean",
+        "default": true
+      },
+      "exposeReturning": {
+        "title": "Returning sensor",
+        "type": "boolean",
+        "default": true
+      },
+      "exposeBattery": {
+        "title": "Battery",
+        "type": "boolean",
+        "default": true
+      },
+      "faultIndicator": {
+        "title": "Fault indicator",
+        "type": "boolean",
+        "default": true
+      },
+      "sensorDebounceSeconds": {
+        "title": "Sensor debounce (seconds)",
+        "type": "integer",
+        "default": 3,
+        "minimum": 0,
+        "maximum": 60,
+        "description": "How long a state must hold before its sensor flips. Faults and battery are reported immediately."
       }
     }
   },
   "layout": [
-    "pollInterval"
+    {
+      "type": "fieldset",
+      "title": "HomeKit sensors",
+      "expandable": false,
+      "items": [
+        "exposeDocked",
+        "exposeLeaving",
+        "exposeMowing",
+        "exposeReturning",
+        "exposeBattery",
+        "faultIndicator",
+        "sensorDebounceSeconds"
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Advanced",
+      "expandable": true,
+      "expanded": false,
+      "items": [
+        "pollInterval"
+      ]
+    }
   ]
 }

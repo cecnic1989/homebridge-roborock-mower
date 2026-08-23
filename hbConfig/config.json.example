@@ -23,7 +23,7 @@
     },
     {
       "platform": "RoborockMower",
-      "pollInterval": 30
+      "pollInterval": 3600
     }
   ],
   "accessories": []
