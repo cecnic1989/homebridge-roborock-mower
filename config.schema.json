@@ -8,11 +8,6 @@
   "schema": {
     "type": "object",
     "properties": {
-      "name": {
-        "title": "Name",
-        "type": "string",
-        "default": "Roborock Mower"
-      },
       "pollInterval": {
         "title": "Poll Interval (seconds)",
         "type": "integer",
@@ -24,7 +19,6 @@
     }
   },
   "layout": [
-    "name",
     "pollInterval"
   ]
 }

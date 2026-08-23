@@ -23,7 +23,6 @@
     },
     {
       "platform": "RoborockMower",
-      "name": "Roborock Mower",
       "pollInterval": 30
     }
   ],
