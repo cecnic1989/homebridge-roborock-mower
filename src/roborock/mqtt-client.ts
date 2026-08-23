@@ -39,6 +39,7 @@ export class RoborockMqtt {
   private client?: MqttClient;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly connectionListeners: ((connected: boolean) => void)[] = [];
+  private lastConnected = false;
 
   constructor(
     private readonly rriot: RRiot,
@@ -66,6 +67,7 @@ export class RoborockMqtt {
       this.emitConnection(true);
     });
     this.client.on('close', () => this.emitConnection(false));
+    this.client.on('offline', () => this.emitConnection(false));
     this.client.on('reconnect', () => this.log.debug('Roborock MQTT reconnecting'));
     this.client.on('error', (error) => this.log.warn(`Roborock MQTT error: ${error.message}`));
     this.client.on('message', (topic, payload) => this.onMessage(topic, payload));
@@ -78,6 +80,7 @@ export class RoborockMqtt {
   stop(): void {
     const client = this.client;
     this.client = undefined;
+    this.lastConnected = false;
     client?.removeAllListeners();
     client?.end(true);
   }
@@ -123,7 +126,12 @@ export class RoborockMqtt {
     }
   }
 
+  // mqtt.js emits close after every failed reconnect attempt; listeners only want the transitions.
   private emitConnection(connected: boolean): void {
+    if (connected === this.lastConnected) {
+      return;
+    }
+    this.lastConnected = connected;
     for (const listener of this.connectionListeners) {
       listener(connected);
     }
