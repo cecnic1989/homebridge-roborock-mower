@@ -132,6 +132,9 @@ dist
 /hbConfig/persist/
 /hbConfig/*.log
 
+# Roborock cloud session written by the plugin's sign-in page
+/hbConfig/roborock-mower/
+
 # Homebridge UI (homebridge-config-ui-x) runtime state and secrets
 /hbConfig/.uix-*
 /hbConfig/backups/

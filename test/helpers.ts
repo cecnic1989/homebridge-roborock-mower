@@ -1,3 +1,7 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import type { API, Logging } from 'homebridge';
 
 export const silentLog = {
@@ -16,11 +20,12 @@ export interface FakeApi {
 }
 
 // Minimal stand-in for the Homebridge API: records registrations and replays events.
-export function fakeApi(): FakeApi {
+export function fakeApi(storagePath = mkdtempSync(join(tmpdir(), 'rr-'))): FakeApi {
   const registered: { name: string; ctor: unknown }[] = [];
   const listeners = new Map<string, (() => void)[]>();
   const api = {
     hap: { Service: {}, Characteristic: {} },
+    user: { storagePath: () => storagePath },
     registerPlatform: (name: string, ctor: unknown) => registered.push({ name, ctor }),
     on: (event: string, cb: () => void) => listeners.set(event, [...(listeners.get(event) ?? []), cb]),
   } as unknown as API;
