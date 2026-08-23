@@ -9,6 +9,12 @@ const rriot = { u: 'u1', s: 's1', h: 'h1', k: 'k1', r: { m: 'ssl://mqtt-us-2.rob
 
 class FakeClient extends EventEmitter {
   connected = false;
+  internalListeners = 0;
+  constructor() {
+    super();
+    this.on('close', () => {}); // mqtt.js registers its own close handler (clears the connack timer)
+    this.internalListeners = this.listenerCount('close');
+  }
   subscribe() {
     return this;
   }
@@ -41,5 +47,19 @@ describe('RoborockMqtt connection events', () => {
     client.connected = true;
     client.emit('connect');
     assert.deepEqual(seen, [true, false, true]);
+  });
+
+  test('stop() leaves mqtt.js internal listeners in place and absorbs a late error', () => {
+    const client = new FakeClient();
+    const mqtt = new RoborockMqtt(rriot, silentLog, (() => client) as never);
+    const seen: boolean[] = [];
+    mqtt.onConnectionChange((c) => seen.push(c));
+    mqtt.start();
+    mqtt.stop();
+    assert.equal(client.listenerCount('close') >= client.internalListeners, true);
+    assert.doesNotThrow(() => client.emit('error', new Error('connack timeout')));
+    client.connected = true;
+    client.emit('connect');
+    assert.deepEqual(seen, [], 'a stopped client must not report a connection');
   });
 });

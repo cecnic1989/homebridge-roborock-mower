@@ -51,7 +51,7 @@ export class RoborockMqtt {
     const creds = mqttCredentials(this.rriot);
     // A per-process suffix keeps two instances on one account (e.g. dev + production) from evicting each other;
     // the broker accepts any clientId as long as username/password match.
-    this.client = this.connect(creds.url, {
+    const client = this.connect(creds.url, {
       clientId: `${creds.username}-${randomAlphanumeric(6)}`,
       username: creds.username,
       password: creds.password,
@@ -59,29 +59,35 @@ export class RoborockMqtt {
       clean: true,
       reconnectPeriod: 15_000,
     });
-    this.client.on('connect', () => {
+    this.client = client;
+    client.on('connect', () => {
+      if (this.client !== client) {
+        return; // a connect that raced stop()
+      }
       this.log.info('Roborock MQTT connected');
       for (const duid of this.subscriptions.keys()) {
         this.subscribeTopic(duid);
       }
       this.emitConnection(true);
     });
-    this.client.on('close', () => this.emitConnection(false));
-    this.client.on('offline', () => this.emitConnection(false));
-    this.client.on('reconnect', () => this.log.debug('Roborock MQTT reconnecting'));
-    this.client.on('error', (error) => this.log.warn(`Roborock MQTT error: ${error.message}`));
-    this.client.on('message', (topic, payload) => this.onMessage(topic, payload));
+    client.on('close', () => this.emitConnection(false));
+    client.on('offline', () => this.emitConnection(false));
+    client.on('reconnect', () => this.log.debug('Roborock MQTT reconnecting'));
+    client.on('error', (error) => this.log.warn(`Roborock MQTT error: ${error.message}`));
+    client.on('message', (topic, payload) => this.onMessage(topic, payload));
   }
 
   get connected(): boolean {
     return this.client?.connected ?? false;
   }
 
+  // Listeners stay attached: mqtt.js clears its connack timer from its own 'close' handler, and our 'error'
+  // handler must outlive end() so a late error cannot become an uncaught exception. lastConnected=false
+  // keeps the shutdown 'close' from being reported as an outage.
   stop(): void {
     const client = this.client;
     this.client = undefined;
     this.lastConnected = false;
-    client?.removeAllListeners();
     client?.end(true);
   }
 
@@ -89,6 +95,12 @@ export class RoborockMqtt {
     this.subscriptions.set(duid, { localKey, onDps });
     if (this.client?.connected) {
       this.subscribeTopic(duid);
+    }
+  }
+
+  unsubscribe(duid: string): void {
+    if (this.subscriptions.delete(duid)) {
+      this.client?.unsubscribe(this.topicFor(duid));
     }
   }
 
