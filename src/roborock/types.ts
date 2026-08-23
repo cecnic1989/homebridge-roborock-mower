@@ -63,8 +63,12 @@ export interface HomeData {
   receivedDevices: HomeDataDevice[];
 }
 
+// `kind` is set by the producer, which knows why a request failed; callers must not re-derive it from `code`
+// (a 401 can mean an expired session or a skewed host clock).
+export type RoborockApiErrorKind = 'session-expired' | 'clock-skew';
+
 export class RoborockApiError extends Error {
-  constructor(message: string, public readonly code?: number) {
+  constructor(message: string, public readonly code?: number, public readonly kind?: RoborockApiErrorKind) {
     super(message);
     this.name = 'RoborockApiError';
   }

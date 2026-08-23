@@ -33,6 +33,7 @@ const KNOWN_ERRORS: Record<number, string> = {
 };
 
 const CLOCK_SKEW_LIMIT_SECONDS = 60;
+const SESSION_EXPIRED_CODE = 2010;
 
 interface Envelope {
   code?: number;
@@ -52,7 +53,8 @@ async function parseEnvelope(response: Response): Promise<Envelope> {
 
 function errorForCode(envelope: Envelope, fallback?: string): RoborockApiError {
   const known = envelope.code === undefined ? undefined : KNOWN_ERRORS[envelope.code];
-  return new RoborockApiError(known ?? fallback ?? `Roborock error ${envelope.code ?? '?'}: ${envelope.msg ?? 'unknown error'}`, envelope.code);
+  const message = known ?? fallback ?? `Roborock error ${envelope.code ?? '?'}: ${envelope.msg ?? 'unknown error'}`;
+  return new RoborockApiError(message, envelope.code, envelope.code === SESSION_EXPIRED_CODE ? 'session-expired' : undefined);
 }
 
 function ensureOk(envelope: Envelope): void {
@@ -143,21 +145,30 @@ export class RoborockWebApi {
     });
   }
 
-  // Region fallback (3030) retries internally; the limiter is charged once per user action, in requestEmailCode().
+  // Region fallback (3030) retries internally, at most once per regional host; the limiter is charged once per
+  // user action, in requestEmailCode().
   private async requestEmailCodeNow(): Promise<RegionInfo> {
-    const region = this.region ?? await this.resolveRegion();
-    const envelope = await this.postForm(
-      new URL('/api/v4/email/code/send', region.baseUrl),
-      { email: this.email, type: 'login', platform: '' },
-      this.loginHeaders(),
-    );
-    if (envelope.code === 3030 && this.candidates.length > 1) {
-      this.candidates = this.candidates.filter((base) => base !== region.baseUrl);
+    let envelope: Envelope = {};
+    for (let attempt = 0; attempt < BASE_URLS.length; attempt++) {
+      const region = this.region ?? await this.resolveRegion();
+      envelope = await this.postForm(
+        new URL('/api/v4/email/code/send', region.baseUrl),
+        { email: this.email, type: 'login', platform: '' },
+        this.loginHeaders(),
+      );
+      if (envelope.code !== 3030) {
+        ensureOk(envelope);
+        return region;
+      }
+      // The server's canonical URL may differ from our candidate string (trailing slash), so exclude by host.
+      const rejectedHost = new URL(region.baseUrl).host;
+      this.candidates = this.candidates.filter((base) => new URL(base).host !== rejectedHost);
       this.region = undefined;
-      return this.requestEmailCodeNow();
+      if (this.candidates.length === 0) {
+        break;
+      }
     }
-    ensureOk(envelope);
-    return region;
+    throw errorForCode(envelope);
   }
 
   loginWithCode(code: string): Promise<UserData> {
@@ -229,6 +240,9 @@ export class RoborockWebApi {
     if (!envelope.success) {
       throw errorForCode(envelope, `Roborock home data request failed: ${envelope.msg ?? 'unknown error'}`);
     }
+    if (typeof envelope.result !== 'object' || envelope.result === null) {
+      throw new RoborockApiError('Roborock returned no home data.');
+    }
     return envelope.result as HomeData;
   }
 
@@ -269,8 +283,9 @@ export class RoborockWebApi {
       return new RoborockApiError(
         `Roborock rejected the signed request and this host's clock is ${Math.abs(skewSeconds)}s ${direction} the server. Fix time sync (NTP) and restart.`,
         401,
+        'clock-skew',
       );
     }
-    return new RoborockApiError('Roborock rejected the signed request (401). Sign in again.', 401);
+    return new RoborockApiError('Roborock rejected the signed request (401). Sign in again.', 401, 'session-expired');
   }
 }

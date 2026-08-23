@@ -53,6 +53,16 @@ describe('requestEmailCode', () => {
     assert.deepEqual(sends, ['usiot.roborock.com', 'euiot.roborock.com']);
   });
 
+  test('gives up on 3030 after every region host instead of recursing forever', async () => {
+    const { fetch, calls } = fakeFetch({
+      // The server's canonical URL need not match a BASE_URLS entry byte for byte.
+      '/api/v1/getUrlByEmail': (req) => ({ code: 200, data: { url: `https://${req.url.host}/`, country: 'US', countrycode: '1' } }),
+      '/api/v4/email/code/send': { code: 3030 },
+    });
+    await assert.rejects(api(fetch).requestEmailCode(), (e: RoborockApiError) => e.code === 3030);
+    assert.equal(calls.filter((c) => c.url.pathname === '/api/v4/email/code/send').length <= 4, true);
+  });
+
   test('maps unknown-account and rate-limit codes to readable errors', async () => {
     for (const [code, pattern] of [[2008, /no roborock account/i], [9002, /too many/i]] as const) {
       const { fetch } = fakeFetch({ '/api/v4/email/code/send': { code } });
@@ -102,6 +112,11 @@ describe('getHomeData', () => {
     assert.equal(home.id, 42);
     assert.equal(calls[0].url.host, 'api-us.roborock.com');
     assert.match(calls[0].headers.authorization, /^Hawk id="u1",/);
+  });
+
+  test('rejects a success envelope without a home instead of returning null', async () => {
+    const { fetch } = fakeFetch({ '/v3/user/homes/42': { success: true, result: null } });
+    await assert.rejects(api(fetch, usRegion).getHomeData(userData, 42), (e: RoborockApiError) => /home/i.test(e.message));
   });
 
   test('blames the host clock when a signed request is rejected and the server time is far off', async () => {
