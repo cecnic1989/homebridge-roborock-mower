@@ -59,6 +59,7 @@
     "typescript-eslint": "^8.46.4"
   },
   "dependencies": {
-    "@homebridge/plugin-ui-utils": "^2.2.5"
+    "@homebridge/plugin-ui-utils": "^2.2.5",
+    "mqtt": "^5.15.2"
   }
 }
