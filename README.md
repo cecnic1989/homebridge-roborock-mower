@@ -31,26 +31,18 @@ Homebridge UI: **Plugins** → search `@cecnic1989/homebridge-roborock-mower`.
 
 ## Configuration
 
-Minimal config:
+1. Homebridge UI → **Plugins** → **Roborock Mower** → **Settings**.
+2. Enter your Roborock account email and press **Send code**.
+3. Enter the verification code Roborock emails you and press **Verify & save**.
+4. Restart Homebridge.
 
-```json
-{
-  "platforms": [
-    {
-      "platform": "RoborockMower",
-      "name": "Roborock Mower"
-    }
-  ]
-}
-```
+Sign-in stores the cloud token in `<homebridge storage>/roborock-mower/session.json` (owner-only permissions); treat it like a password. Use **Sign out** in the settings page to remove it.
 
-Everything else is optional:
+Optional fields:
 
 | Field | Default | Description |
 |---|---|---|
 | `pollInterval` | `60` | How often to check the mower, in seconds (min 15, max 3600) |
-
-The easiest way to set all of this is the Homebridge UI's settings form for the plugin, which lists every option with descriptions.
 
 ## Support
 

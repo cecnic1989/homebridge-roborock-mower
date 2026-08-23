@@ -37,7 +37,7 @@ Runs a real Homebridge instance. Auto-rebuilds on save.
 npm run watch
 ```
 
-Homebridge UI is at http://localhost:8581.
+Homebridge UI is at http://localhost:8581. Sign in via **Plugins → Roborock Mower → Settings** (email → code), then restart; the log prints the discovered mower's model and `pv`.
 
 **Pair with iPhone (optional):** Home app → Add Accessory → "I Don't Have a Code" → enter `031-45-154`. iPhone must be on the same network.
 
@@ -53,7 +53,8 @@ gh release create vX.Y.Z --generate-notes
 
 ## Design Notes
 
-- **No runtime deps.** Native `fetch`, no supply-chain surface.
+- **No runtime deps except official `@homebridge/*` packages.** Roborock cloud access is native `fetch` + `node:crypto` (`src/roborock/`); `@homebridge/plugin-ui-utils` powers the sign-in page in `homebridge-ui/`.
+- **Email-code sign-in only.** Roborock's password login is effectively dead (2FA on most accounts). The custom UI requests a code, exchanges it, and stores the resulting session (token + `rriot`) in `<storage>/roborock-mower/session.json` — not config.json, because the UI's schema-form SAVE button rewrites the platform block and would drop it.
 - **Platform owns polling.** Single timer pushes state into accessories via `refreshState()`.
 
 ## Style
