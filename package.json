@@ -9,7 +9,7 @@
   "homepage": "https://github.com/cecnic1989/homebridge-roborock-mower#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cecnic1989/homebridge-roborock-mower.git"
+    "url": "git+https://github.com/cecnic1989/homebridge-roborock-mower.git"
   },
   "bugs": {
     "url": "https://github.com/cecnic1989/homebridge-roborock-mower/issues"
