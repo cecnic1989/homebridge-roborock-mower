@@ -80,7 +80,7 @@ function toCached(device: MowerDevice): CachedDevice {
 }
 
 function isSessionExpired(error: unknown): boolean {
-  return error instanceof RoborockApiError && (error.code === 2010 || error.code === 401);
+  return error instanceof RoborockApiError && error.kind === 'session-expired';
 }
 
 export class RoborockMowerPlatform implements DynamicPlatformPlugin {
@@ -133,6 +133,9 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
 
   // Safety net only: re-reads home data so a missed push, a rename, or a new device is picked up eventually.
   async reconcile(): Promise<void> {
+    if (this.sessionExpiredLogged) {
+      await this.adoptNewSession();
+    }
     await this.syncFromCloud('re-sync');
   }
 
@@ -162,10 +165,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     if (this.stopped) {
       return;
     }
-    this.session = session;
-    this.webApi = new RoborockWebApi({
-      email: session.email, clientId: session.clientId, region: session.region, fetch: this.deps.fetch, now: this.deps.now,
-    });
+    this.useSession(session);
 
     // MQTT first: it only needs the session, so cached mowers get live updates even if the cloud is unreachable right now.
     this.startMqtt(session);
@@ -181,6 +181,31 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     }
     this.reconcileTimer = setInterval(() => void this.reconcile(), this.pollSeconds() * 1000);
     this.reconcileTimer.unref?.();
+  }
+
+  private useSession(session: StoredSession): void {
+    this.session = session;
+    this.homeId = undefined;
+    this.webApi = new RoborockWebApi({
+      email: session.email, clientId: session.clientId, region: session.region, fetch: this.deps.fetch, now: this.deps.now,
+    });
+  }
+
+  // The UI writes a new session file when the user signs in again; use it for cloud calls without waiting for a restart.
+  private async adoptNewSession(): Promise<void> {
+    let session: StoredSession | undefined;
+    try {
+      session = await (this.deps.readSession ?? readSession)(this.api.user.storagePath());
+    } catch (error) {
+      this.log.debug(`Could not re-read the session file: ${message(error)}`);
+      return;
+    }
+    if (!session || session.userData.token === this.session?.userData.token) {
+      return;
+    }
+    this.log.info('Picked up the new Roborock sign-in. Restart Homebridge if live updates do not resume.');
+    this.useSession(session);
+    this.sessionExpiredLogged = false;
   }
 
   private stop(): void {
@@ -208,8 +233,14 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       this.mqtt.start();
     } catch (error) {
       this.log.error(`Roborock MQTT could not start: ${message(error)}. State will only refresh every ${this.pollSeconds()}s.`);
+      this.mqtt = undefined;
       this.restoreFromCache();
     }
+  }
+
+  // With no broker at all the sensors are fed by the cloud poll, so they count as active; with one, only once it is up.
+  private get live(): boolean {
+    return this.mqtt ? this.mqtt.connected : true;
   }
 
   // Accessories Homebridge restored carry the device identity in their context, so they can be tracked before any cloud call.
@@ -227,7 +258,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     accessory.setInformation({ model: device.model, serial: device.sn, firmware: device.fv });
     const tracked: TrackedMower = { device, online: true, platformAccessory, accessory, dps: {} };
     this.mowers.set(device.duid, tracked);
-    accessory.setOnline(this.mqtt?.connected ?? false);
+    accessory.setOnline(this.live);
     this.subscribeMqtt(tracked);
     return tracked;
   }
@@ -243,14 +274,21 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     this.mqtt.subscribe(tracked.device.duid, tracked.device.localKey, (dps) => this.applyDps(tracked, dps, 'push'));
   }
 
+  // Runs from timers, so it must never reject: an unhandled rejection would take Homebridge down.
   private async syncFromCloud(reason: string): Promise<boolean> {
     if (!this.webApi || !this.session) {
       return false;
     }
-    let home: HomeData;
     try {
       this.homeId ??= await this.webApi.getHomeId(this.session.userData);
-      home = await this.webApi.getHomeData(this.session.userData, this.homeId);
+      const home = await this.webApi.getHomeData(this.session.userData, this.homeId);
+      if (this.stopped) {
+        return true;
+      }
+      this.sessionExpiredLogged = false;
+      this.syncMowers(home);
+      await this.saveStatus();
+      return true;
     } catch (error) {
       if (isSessionExpired(error)) {
         if (!this.sessionExpiredLogged) {
@@ -263,13 +301,6 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       }
       return false;
     }
-    if (this.stopped) {
-      return true;
-    }
-    this.sessionExpiredLogged = false;
-    this.syncMowers(home);
-    await this.saveStatus();
-    return true;
   }
 
   // Creates/updates one accessory per mower on the account. A successful sync is the source of truth:
@@ -296,7 +327,8 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
         }
         tracked = this.track(platformAccessory, cached);
         this.log.info(`Found mower "${device.name}" (model=${device.model}, pv=${device.pv}, online=${device.online})`);
-      } else if (!tracked.device.localKey && cached.localKey) {
+      } else if (cached.localKey !== tracked.device.localKey) {
+        // Re-pairing the mower in the app rotates its key; pushes on the old key would decrypt to nothing, silently.
         tracked.device = cached;
         this.subscribeMqtt(tracked);
       }
@@ -318,7 +350,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
         this.log.debug(`${device.name}: cloud snapshot ignored in favour of live state: ${JSON.stringify(device.deviceStatus)}`);
       }
       tracked.online = device.online !== false;
-      tracked.accessory.setOnline(tracked.online && connected);
+      tracked.accessory.setOnline(tracked.online && this.live);
     }
 
     for (const tracked of [...this.mowers.values()]) {
@@ -330,6 +362,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
 
   private remove(tracked: TrackedMower): void {
     this.log.info(`Removing accessory no longer on the account: ${tracked.platformAccessory.displayName}`);
+    this.mqtt?.unsubscribe(tracked.device.duid);
     tracked.accessory.dispose();
     this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [tracked.platformAccessory]);
     this.accessories.delete(tracked.platformAccessory.UUID);

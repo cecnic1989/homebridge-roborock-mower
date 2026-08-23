@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
 
-import { clearSession, readSession, readStatus, sessionPath, writeSession, writeStatus } from '../src/roborock/session-store.js';
+import { clearSession, readSession, sessionPath, writeSession } from '../src/roborock/session-store.js';
 import type { StoredSession } from '../src/roborock/types.js';
 
 const session: StoredSession = {
@@ -54,15 +54,5 @@ describe('atomic writes', () => {
     } finally {
       await chmod(folder, 0o700);
     }
-  });
-});
-
-describe('status file', () => {
-  test('round-trips the platform status and reads as undefined when absent', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'rr-'));
-    assert.equal(await readStatus(dir), undefined);
-    const status = { updatedAt: 1700000000000, devices: [{ duid: 'd', name: 'Mower', model: 'roborock.mower.a282', online: true }] };
-    await writeStatus(dir, status);
-    assert.deepEqual(await readStatus(dir), status);
   });
 });

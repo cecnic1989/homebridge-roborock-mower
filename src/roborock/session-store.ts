@@ -89,3 +89,7 @@ export async function readStatus(storagePath: string): Promise<PlatformStatus | 
 export async function writeStatus(storagePath: string, status: PlatformStatus): Promise<void> {
   await writeFileAtomic(statusPath(storagePath), JSON.stringify(status, null, 2), 0o600);
 }
+
+export async function clearStatus(storagePath: string): Promise<void> {
+  await rm(statusPath(storagePath), { force: true });
+}
