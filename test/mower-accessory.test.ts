@@ -3,7 +3,7 @@ import { describe, mock, test } from 'node:test';
 
 import { MowerAccessory, type SensorOptions } from '../src/mower/accessory.js';
 import type { DerivedState } from '../src/mower/state.js';
-import { fakeAccessory, fakeHap } from './fake-hap.js';
+import { fakeAccessory, fakeHap, FakePlatformAccessory } from './fake-hap.js';
 import { silentLog } from './helpers.js';
 
 const allOn: SensorOptions = { docked: true, leaving: true, mowing: true, returning: true, battery: true, faultIndicator: true, debounceSeconds: 3 };
@@ -90,5 +90,32 @@ describe('MowerAccessory state pushes', () => {
     const sensors = services.filter((s) => s.type === 'ContactSensor');
     assert.equal(sensors.length, 4);
     assert.ok(sensors.every((s) => s.value('StatusActive') === false));
+  });
+});
+
+describe('MowerAccessory naming', () => {
+  test('keeps a ConfiguredName the user set in the Home app when restoring from cache', () => {
+    const cached = new FakePlatformAccessory('Mower', 'uuid-1');
+    cached.addService(fakeHap.Service.ContactSensor, 'Mower Docked', 'docked').setCharacteristic(fakeHap.Characteristic.ConfiguredName, 'Garage Mower Home');
+    new MowerAccessory(fakeHap as never, cached as never, silentLog, allOn);
+    assert.equal(cached.find(fakeHap.Service.ContactSensor, 'docked')?.value('ConfiguredName'), 'Garage Mower Home');
+  });
+
+  test('rename follows the Roborock app name on every service Name', () => {
+    const { mower, services } = build();
+    mower.rename('Front Lawn');
+    assert.ok(services.filter((s) => s.type === 'ContactSensor').every((s) => String(s.value('Name')).startsWith('Front Lawn ')));
+  });
+
+  test('dispose cancels a pending debounced flip', () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { mower, updates } = build();
+    mower.update(state());
+    const before = updates.length;
+    mower.update(state({ docked: false }));
+    mower.dispose();
+    mock.timers.tick(10_000);
+    assert.equal(updates.length, before);
+    mock.timers.reset();
   });
 });

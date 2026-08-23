@@ -25,7 +25,7 @@ const SENSOR_LABELS: Record<SensorKey, string> = { docked: 'Docked', leaving: 'L
 const SENSOR_KEYS = Object.keys(SENSOR_LABELS) as SensorKey[];
 
 // Home-app automations trigger on "opens"/"closes". Docked closes when the mower is home;
-// the activity sensors open when their activity starts, so "Leaving opens → open the garage" reads naturally.
+// the activity sensors open when their activity starts, so "Docked opens → open the garage" reads naturally.
 function contactValue(key: SensorKey, active: boolean, c: Hap['Characteristic']): number {
   const detected = c.ContactSensorState.CONTACT_DETECTED;
   const notDetected = c.ContactSensorState.CONTACT_NOT_DETECTED;
@@ -41,6 +41,8 @@ export class MowerAccessory {
   private readonly applied = new Map<SensorKey, boolean>();
   private readonly pending = new Map<SensorKey, { value: boolean; timer: NodeJS.Timeout }>();
   private last: Partial<Pick<DerivedState, 'fault' | 'battery' | 'lowBattery' | 'charging'>> = {};
+  private baseName: string;
+  private readonly debounceMs: number;
 
   constructor(
     private readonly hap: Hap,
@@ -49,6 +51,8 @@ export class MowerAccessory {
     private readonly options: SensorOptions,
   ) {
     const { Service, Characteristic } = hap;
+    this.baseName = accessory.displayName;
+    this.debounceMs = Number.isFinite(options.debounceSeconds) && options.debounceSeconds > 0 ? options.debounceSeconds * 1000 : 0;
     if (!accessory.getService(Service.AccessoryInformation)) {
       accessory.addService(Service.AccessoryInformation);
     }
@@ -61,8 +65,13 @@ export class MowerAccessory {
         }
         continue;
       }
-      const name = `${accessory.displayName} ${SENSOR_LABELS[key]}`;
-      const service = existing ?? accessory.addService(Service.ContactSensor, name, key);
+      if (existing) {
+        // Restored from cache: leave Name/ConfiguredName alone so renames made in the Home app survive restarts.
+        this.sensors.set(key, existing);
+        continue;
+      }
+      const name = this.sensorName(key);
+      const service = accessory.addService(Service.ContactSensor, name, key);
       service.setCharacteristic(Characteristic.Name, name);
       service.setCharacteristic(Characteristic.ConfiguredName, name);
       this.sensors.set(key, service);
@@ -70,7 +79,7 @@ export class MowerAccessory {
 
     const existingBattery = accessory.getService(Service.Battery);
     if (options.battery) {
-      this.battery = existingBattery ?? accessory.addService(Service.Battery, `${accessory.displayName} Battery`);
+      this.battery = existingBattery ?? accessory.addService(Service.Battery, `${this.baseName} Battery`);
     } else if (existingBattery) {
       accessory.removeService(existingBattery);
     }
@@ -83,6 +92,22 @@ export class MowerAccessory {
       .setCharacteristic(Characteristic.Model, info.model)
       .setCharacteristic(Characteristic.SerialNumber, info.serial ?? this.accessory.UUID)
       .setCharacteristic(Characteristic.FirmwareRevision, info.firmware ?? '0');
+  }
+
+  // Follows a rename made in the Roborock app. ConfiguredName is only touched if the user never changed it in Home.
+  rename(displayName: string): void {
+    const c = this.hap.Characteristic;
+    const previousBase = this.baseName;
+    this.baseName = displayName;
+    for (const [key, service] of this.sensors) {
+      const previous = `${previousBase} ${SENSOR_LABELS[key]}`;
+      const next = this.sensorName(key);
+      service.updateCharacteristic(c.Name, next);
+      if (service.getCharacteristic(c.ConfiguredName).value === previous) {
+        service.updateCharacteristic(c.ConfiguredName, next);
+      }
+    }
+    this.battery?.updateCharacteristic(c.Name, `${displayName} Battery`);
   }
 
   update(state: DerivedState): void {
@@ -99,7 +124,18 @@ export class MowerAccessory {
     }
   }
 
-  // Activity flags must hold for debounceSeconds before HomeKit sees them; the first value is applied immediately.
+  dispose(): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+    }
+    this.pending.clear();
+  }
+
+  private sensorName(key: SensorKey): string {
+    return `${this.baseName} ${SENSOR_LABELS[key]}`;
+  }
+
+  // Activity flags must hold for the debounce period before HomeKit sees them; the first value is applied immediately.
   private schedule(key: SensorKey, value: boolean): void {
     const pending = this.pending.get(key);
     if (this.applied.get(key) === value) {
@@ -115,21 +151,21 @@ export class MowerAccessory {
     if (pending) {
       clearTimeout(pending.timer);
     }
-    if (!this.applied.has(key) || this.options.debounceSeconds <= 0) {
+    if (!this.applied.has(key) || this.debounceMs === 0) {
       this.apply(key, value);
       return;
     }
     const timer = setTimeout(() => {
       this.pending.delete(key);
       this.apply(key, value);
-    }, this.options.debounceSeconds * 1000);
+    }, this.debounceMs);
     this.pending.set(key, { value, timer });
   }
 
   private apply(key: SensorKey, value: boolean): void {
     this.applied.set(key, value);
     this.sensors.get(key)?.updateCharacteristic(this.hap.Characteristic.ContactSensorState, contactValue(key, value, this.hap.Characteristic));
-    this.log.debug(`${this.accessory.displayName}: ${SENSOR_LABELS[key]} ${value ? 'on' : 'off'}`);
+    this.log.debug(`${this.baseName}: ${SENSOR_LABELS[key]} ${value ? 'on' : 'off'}`);
   }
 
   private pushFault(fault: boolean): void {

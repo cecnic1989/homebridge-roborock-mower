@@ -77,7 +77,7 @@ export class FakePlatformAccessory {
   readonly services: FakeService[] = [];
   context: Record<string, unknown> = {};
 
-  constructor(readonly displayName: string, readonly UUID: string) {}
+  constructor(public displayName: string, readonly UUID: string) {}
 
   find(type: { UUID: string }, subtype?: string): FakeService | undefined {
     return this.services.find((s) => s.type === type.UUID && s.subtype === subtype);
