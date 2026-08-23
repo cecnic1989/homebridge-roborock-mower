@@ -48,8 +48,26 @@ Publishing is handled by `.github/workflows/publish.yml` via npm trusted publish
 ```bash
 npm version patch        # or minor / major — commits x.y.z and tags vx.y.z
 git push --follow-tags
-gh release create vX.Y.Z --generate-notes
+gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md
 ```
+
+### Release notes
+
+Written for the person running the plugin, not from the commit list (never `--generate-notes`). Same format as `homebridge-frigidaire-dehumidifier`:
+
+```markdown
+## What's Changed
+
+- **One bold sentence saying what changed, from the user's point of view.** Then why it matters and what, if anything, they must do ("nothing to change on your side", "restart Homebridge afterwards").
+- **Fixed: describe the symptom the user saw.** Then the cause in one clause and the effect of the fix.
+
+**Full Changelog**: https://github.com/cecnic1989/homebridge-roborock-mower/compare/vPREV...vX.Y.Z
+```
+
+- Title is the tag (`v0.2.3`), nothing else.
+- One bullet per user-visible change; internal refactors are folded into the change they enable or left out.
+- Plain language: "sensors show as inactive", not "StatusActive=false"; name settings as they appear in the UI.
+- A release with no user-visible change says so in one bullet ("Package metadata only.").
 
 ## Design Notes
 
