@@ -156,36 +156,26 @@ describe('RoborockMowerPlatform startup', () => {
 });
 
 describe('RoborockMowerPlatform re-sync', () => {
-  test('an empty device list never removes the accessory', async () => {
-    let response: object = { success: true, result: home };
-    const { platform, accessories, resync } = start({ session, homeResponse: () => response });
-    await platform.whenStarted();
-    response = empty;
-    await resync();
-    await resync();
-    await resync();
-    assert.equal(accessories.length, 1);
-  });
-
-  test('a mower missing from three consecutive syncs is removed; one miss is not', async () => {
+  test('a mower absent from a successful sync is removed, whatever else the account lists', async () => {
     let response: object = { success: true, result: home };
     const { platform, accessories, resync } = start({ session, homeResponse: () => response });
     await platform.whenStarted();
     response = withoutMower;
     await resync();
-    assert.equal(accessories.length, 1);
-    await resync();
-    await resync();
     assert.equal(accessories.length, 0);
+    assert.equal(platform.accessories.size, 0);
   });
 
-  test('a miss counter survives a restart through accessory.context', async () => {
-    const cached = new FakePlatformAccessory('RockMow X120H LiDAR', 'uuid-mower-duid');
-    cached.context = { device: { duid: 'mower-duid', name: 'RockMow X120H LiDAR', model: 'roborock.mower.a282', localKey: 'localkey' }, missedSyncs: 2 };
-    const { platform, accessories } = start({ session, cached: [cached], homeResponse: () => withoutMower });
+  test('a failed sync never removes anything', async () => {
+    let response: object | Response = { success: true, result: home };
+    const { platform, accessories, resync } = start({ session, homeResponse: () => response });
     await platform.whenStarted();
-    assert.equal(accessories.length, 0, 'third miss at boot removes it');
-    assert.equal(platform.accessories.size, 0);
+    response = new Response('', { status: 503 });
+    await resync();
+    assert.equal(accessories.length, 1, 'a 503 is no information');
+    response = empty;
+    await resync();
+    assert.equal(accessories.length, 0, 'an empty list on a 200 is a real absence');
   });
 
   test('a cloud snapshot does not overwrite fresher push state while connected', async () => {

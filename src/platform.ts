@@ -43,8 +43,6 @@ interface CachedDevice {
 
 interface MowerContext {
   device?: CachedDevice;
-  missedSyncs?: number;
-  lastSeenAt?: number;
 }
 
 interface TrackedMower {
@@ -61,7 +59,6 @@ const MIN_POLL_SECONDS = 900; // Roborock rate-limits home data; python-roborock
 const MAX_POLL_SECONDS = 86_400;
 const DEFAULT_POLL_SECONDS = 3600;
 const STARTUP_RETRY_MS = 5 * 60_000;
-const MISSES_BEFORE_REMOVAL = 3;
 const SESSION_EXPIRED = 'session-expired';
 
 function message(error: unknown): string {
@@ -275,14 +272,13 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     return true;
   }
 
-  // Creates/updates one accessory per mower on the account; removal needs several consecutive confirmed absences.
+  // Creates/updates one accessory per mower on the account. A successful sync is the source of truth:
+  // failures never reach here, so a mower that is not listed has left the account and is removed.
   private syncMowers(home: HomeData): void {
     const devices = findMowers(home);
-    const listed = (home.devices?.length ?? 0) + (home.receivedDevices?.length ?? 0);
     if (devices.length === 0) {
-      this.log.warn(listed === 0
-        ? 'Roborock returned an empty device list; keeping the cached mower(s).'
-        : `No mower found on this Roborock account (${listed} other device(s)).`);
+      const listed = (home.devices?.length ?? 0) + (home.receivedDevices?.length ?? 0);
+      this.log.warn(`No mower found on this Roborock account (${listed} other device(s)).`);
     }
 
     const seen = new Set<string>();
@@ -305,10 +301,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
         this.subscribeMqtt(tracked);
       }
       tracked.device = cached;
-      const context = tracked.platformAccessory.context as MowerContext;
-      context.device = cached;
-      context.missedSyncs = 0;
-      context.lastSeenAt = this.now();
+      (tracked.platformAccessory.context as MowerContext).device = cached;
 
       if (tracked.platformAccessory.displayName !== device.name) {
         this.log.info(`Renaming "${tracked.platformAccessory.displayName}" to "${device.name}" (changed in the Roborock app)`);
@@ -328,21 +321,9 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       tracked.accessory.setOnline(tracked.online && connected);
     }
 
-    if (listed === 0) {
-      return;
-    }
-    for (const [duid, tracked] of [...this.mowers]) {
-      if (seen.has(duid)) {
-        continue;
-      }
-      const context = tracked.platformAccessory.context as MowerContext;
-      const missed = (context.missedSyncs ?? 0) + 1;
-      context.missedSyncs = missed;
-      if (missed >= MISSES_BEFORE_REMOVAL) {
+    for (const tracked of [...this.mowers.values()]) {
+      if (!seen.has(tracked.device.duid)) {
         this.remove(tracked);
-      } else {
-        this.log.warn(`${tracked.device.name} missing from the account (${missed}/${MISSES_BEFORE_REMOVAL} syncs); removed after ${MISSES_BEFORE_REMOVAL}.`);
-        this.api.updatePlatformAccessories([tracked.platformAccessory]);
       }
     }
   }
