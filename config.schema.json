@@ -3,6 +3,7 @@
   "pluginType": "platform",
   "singular": true,
   "strictValidation": false,
+  "customUi": true,
   "headerDisplay": "Homebridge plugin for Roborock RockMow robot lawn mowers.",
   "schema": {
     "type": "object",

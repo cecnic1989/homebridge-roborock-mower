@@ -27,6 +27,13 @@
     "homekit"
   ],
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "homebridge-ui",
+    "config.schema.json",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": "^20.19.0 || ^22.10.0 || ^24.0.0",
     "homebridge": "^1.8.0 || ^2.0.0-beta.0"
@@ -50,5 +57,8 @@
     "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.46.4"
+  },
+  "dependencies": {
+    "@homebridge/plugin-ui-utils": "^2.2.5"
   }
 }

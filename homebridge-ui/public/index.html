@@ -1,0 +1,30 @@
+<div class="card mb-3">
+  <div class="card-body">
+    <h5 class="card-title">Roborock account</h5>
+
+    <div id="signed-out">
+      <p class="text-muted small">Sign in with the email of your Roborock app account. Roborock will email you a verification code.</p>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input id="email" type="email" class="form-control" placeholder="name@example.com" autocomplete="email">
+      </div>
+      <button id="send-code" type="button" class="btn btn-primary">Send code</button>
+
+      <div id="code-step" class="mt-3 d-none">
+        <div class="form-group">
+          <label for="code">Verification code</label>
+          <input id="code" type="text" class="form-control" inputmode="numeric" placeholder="6-digit code from the email">
+        </div>
+        <button id="verify-code" type="button" class="btn btn-primary">Verify &amp; save</button>
+      </div>
+    </div>
+
+    <div id="signed-in" class="d-none">
+      <p>Signed in as <strong id="signed-in-email"></strong></p>
+      <button id="sign-out" type="button" class="btn btn-outline-danger btn-sm">Sign out</button>
+      <div id="devices" class="mt-3"></div>
+    </div>
+  </div>
+</div>
+
+<script src="index.js"></script>
