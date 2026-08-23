@@ -9,15 +9,31 @@
 
 Homebridge plugin for Roborock RockMow robot lawn mowers. Exposes your mower to Apple Home.
 
-> **Early development.** The plugin installs and loads, but does not yet talk to any mower. Device support is in progress.
+> **Early development.** Status sensors and battery work (tested on a RockMow Z1 / X120H). Controls are next.
 
 ## Features
 
-Planned:
+- **State sensors** for Home-app automations: Docked, Leaving, Mowing, Returning (each a contact sensor, live via Roborock's cloud push)
+- **Battery** level, charging state, low-battery flag
+- **Fault indicator** on every sensor when the mower reports an error
 
-- **Mower status** - mowing, docked, charging, paused, error
-- **Start / pause / return to dock** controls
-- **Battery level** and charging state
+Planned: start / pause / return-to-dock controls.
+
+## Automations
+
+Each state is a contact sensor so the Home app can trigger on it ("A Sensor Detects Something"):
+
+| Sensor | Opens when | Closes when |
+|---|---|---|
+| **Docked** | it leaves the dock | it is back on the dock (charging or charged) |
+| **Leaving** | a job starts (initializing / undocking) | it begins cutting |
+| **Mowing** | it starts cutting or driving to a zone | cutting stops |
+| **Returning** | it heads back to the dock | it reaches the dock |
+
+Example for a dock inside a garage: *Leaving opens → open garage*, *Mowing opens → close garage*, *Returning opens → open garage*, *Docked closes → close garage*.
+Note: the mower starts driving ~1.5 s after "Leaving" opens, so for the outbound trip pair it with a time-based automation on the mowing schedule if the door needs longer.
+
+Sensors flip only after a state holds for `sensorDebounceSeconds` (default 3 s); faults and battery update immediately. While the cloud connection is down, sensors show as inactive rather than stale.
 
 ## Requirements
 
@@ -42,7 +58,11 @@ Optional fields:
 
 | Field | Default | Description |
 |---|---|---|
-| `pollInterval` | `60` | How often to check the mower, in seconds (min 15, max 3600) |
+| `exposeDocked`, `exposeLeaving`, `exposeMowing`, `exposeReturning` | `true` | Which state sensors to create |
+| `exposeBattery` | `true` | Battery service |
+| `faultIndicator` | `true` | Set StatusFault on the sensors when the mower reports an error |
+| `sensorDebounceSeconds` | `3` | How long a state must hold before its sensor flips (0–60) |
+| `pollInterval` | `3600` | Cloud re-sync interval in seconds (min 900). Live state comes by push; Roborock rate-limits this call, so keep it high |
 
 ## Support
 

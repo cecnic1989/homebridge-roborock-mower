@@ -53,9 +53,11 @@ gh release create vX.Y.Z --generate-notes
 
 ## Design Notes
 
-- **No runtime deps except official `@homebridge/*` packages.** Roborock cloud access is native `fetch` + `node:crypto` (`src/roborock/`); `@homebridge/plugin-ui-utils` powers the sign-in page in `homebridge-ui/`.
+- **Runtime deps: official `@homebridge/*` packages and `mqtt` only.** Roborock cloud access is native `fetch` + `node:crypto` (`src/roborock/`); `@homebridge/plugin-ui-utils` powers the sign-in page in `homebridge-ui/`; `mqtt` carries live device state.
+- **One cloud client, rate-limited.** The platform owns a single `RoborockWebApi`; it serializes calls and enforces python-roborock's budgets (home data 5/h, 40/day). Startup costs exactly one home-data call; everything live comes from MQTT push (`src/roborock/mqtt-client.ts`, V1 frames in `v1-protocol.ts`); `pollInterval` is only an hourly re-sync. Never retry a failed home-data call in a loop.
+- **State semantics are empirical.** DPS meanings come from python-roborock plus a real RockMow capture (`test/fixtures/dps-sequence.json`); see `src/mower/state.ts`. Re-run `npx tsx scripts/mqtt-probe.ts` to capture new sequences.
 - **Email-code sign-in only.** Roborock's password login is effectively dead (2FA on most accounts). The custom UI requests a code, exchanges it, and stores the resulting session (token + `rriot`) in `<storage>/roborock-mower/session.json` — not config.json, because the UI's schema-form SAVE button rewrites the platform block and would drop it.
-- **Platform owns polling.** Single timer pushes state into accessories via `refreshState()`.
+- **Platform owns all I/O.** Accessories (`src/mower/accessory.ts`) only receive derived state via `update()`; they never touch the cloud.
 
 ## Style
 
