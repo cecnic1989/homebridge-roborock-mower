@@ -15,7 +15,7 @@ const allOn: SensorOptions = {
 function state(overrides: Partial<DerivedState> = {}): DerivedState {
   return {
     docked: true, leaving: false, mowing: false, returning: false, charging: false, paused: false, fault: false, attention: false,
-    battery: 100, lowBattery: false, mowState: 0, errorCode: 0, ...overrides,
+    jobActive: false, battery: 100, lowBattery: false, mowState: 0, errorCode: 0, ...overrides,
   };
 }
 
@@ -148,12 +148,32 @@ describe('MowerAccessory controls', () => {
   });
 
   test('switch state mirrors the mower: an app-started job turns Mow on, a pause turns Pause on', () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
     const { mower, find } = buildControls(async () => {});
-    mower.update(state({ docked: false, mowing: true }));
+    mower.update(state({ docked: false, mowing: true, jobActive: true }));
+    mock.timers.tick(3000);
     assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), true);
-    mower.update(state({ docked: false, paused: true }));
-    assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), false);
+    mower.update(state({ docked: false, paused: true, jobActive: true }));
+    mock.timers.tick(3000);
+    assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), true, 'a paused job is still a job — off would restart the whole lawn');
     assert.equal(find(fakeHap.Service.Switch, 'pause')?.value('On'), true);
+    mock.timers.reset();
+  });
+
+  test('a push that lags the command does not yank the switch back (no on-off-on flicker)', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { mower, find, updates } = buildControls(async () => {});
+    mower.update(state()); // docked, no job
+    mock.timers.tick(3000);
+    await find(fakeHap.Service.Switch, 'mow')!.triggerSet('On', true);
+    const before = updates.filter((u) => u.service === 'mow').length;
+    mower.update(state()); // the mower has not reported the job yet — a stale push or cloud poll
+    mock.timers.tick(1000);
+    mower.update(state({ docked: false, jobActive: true })); // now it has
+    mock.timers.tick(5000);
+    assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), true);
+    assert.equal(updates.filter((u) => u.service === 'mow').length, before, 'no characteristic churn during the transition');
+    mock.timers.reset();
   });
 });
 

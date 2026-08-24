@@ -82,6 +82,13 @@ describe('deriveMowerState edge cases', () => {
     assert.equal(describeAttention(deriveMowerState({ 123: 56 })), undefined);
   });
 
+  test('a job counts as active from start push to end push, through pause and rain-dock (DPS 132)', () => {
+    assert.equal(deriveMowerState({ 132: 1, 123: 57 }).jobActive, true);
+    assert.equal(deriveMowerState({ 132: 1, 123: 58 }).jobActive, true, 'paused mid-job');
+    assert.equal(deriveMowerState({ 132: 1, 123: 61, 127: 1 }).jobActive, true, 'rain-docked mid-job');
+    assert.equal(deriveMowerState({ 132: 0, 123: 0, 143: 104 }).jobActive, false, 'returning after the job ended');
+  });
+
   test('battery level and low-battery threshold', () => {
     assert.equal(deriveMowerState({ 121: 20 }).lowBattery, true);
     assert.equal(deriveMowerState({ 121: 21 }).lowBattery, false);

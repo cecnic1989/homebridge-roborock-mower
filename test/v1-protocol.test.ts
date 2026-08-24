@@ -49,6 +49,14 @@ describe('parseDpsPush', () => {
 });
 
 describe('encodeV1Frame', () => {
+  test('matches the wire format the a282 accepted live on 2026-08-23 (pinned vector)', () => {
+    // Any drift in header layout, key derivation, salt or CRC breaks silently against hardware; this pins the bytes.
+    const frame = encodeV1Frame(101, 1787523488, '{"dps":{"101":"{}"},"t":1787523488}', 'localkey', 5538412, 2959);
+    assert.equal(frame.toString('hex'),
+      '312e300054826c00000b8f6a8b71a000650030fa6d9de094d24f1ca5454e37325ae46eee939df0dac12ea4c86829ccadeae8'
+      + '46b72551701cb3375beea92fd5a5b2a2fdc3d7b595');
+  });
+
   test('what we encode, we decode: protocol, timestamp, seq and payload survive the round trip', () => {
     const payload = '{"dps":{"101":"{\\"id\\":1}"},"t":1787523488}';
     const frames = decodeFrames(encodeV1Frame(101, 1787523488, payload, 'localkey', 42, 7), 'localkey');

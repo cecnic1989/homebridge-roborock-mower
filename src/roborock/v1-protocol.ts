@@ -57,19 +57,49 @@ export interface RpcResponse {
   error?: unknown;
 }
 
-// The RPC reply rides the same 102 frames as status pushes, as a JSON string under dps key "102".
-export function parseRpcResponse(payload: Buffer): RpcResponse | undefined {
+export interface V1Payload {
+  rpc?: RpcResponse;
+  dps?: Record<number, unknown>;
+}
+
+// One frame can carry status dps AND an RPC reply (dps key "102", a JSON string) side by side; deliver both.
+export function parseV1Payload(payload: Buffer): V1Payload | undefined {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(payload.toString('utf8')) as { dps?: Record<string, unknown> };
-    const reply = parsed?.dps?.['102'];
-    if (typeof reply !== 'string') {
-      return undefined;
-    }
-    const body = JSON.parse(reply) as RpcResponse;
-    return typeof body?.id === 'number' ? body : undefined;
+    parsed = JSON.parse(payload.toString('utf8'));
   } catch {
     return undefined;
   }
+  const raw = (parsed as { dps?: unknown } | null)?.dps;
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  const result: V1Payload = {};
+  const dps: Record<number, unknown> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const id = Number(key);
+    if (!Number.isInteger(id)) {
+      continue;
+    }
+    if (RPC_DPS_KEYS.has(id)) {
+      if (id === 102 && typeof value === 'string') {
+        try {
+          const body = JSON.parse(value) as RpcResponse;
+          if (typeof body?.id === 'number') {
+            result.rpc = body;
+          }
+        } catch {
+          // not a reply we understand; ignore
+        }
+      }
+      continue;
+    }
+    dps[id] = value;
+  }
+  if (Object.keys(dps).length > 0) {
+    result.dps = dps;
+  }
+  return result;
 }
 
 // One MQTT message can carry several frames; frames with a bad CRC or undecryptable payload are skipped.
@@ -105,22 +135,6 @@ export function decodeFrames(buffer: Buffer, localKey: string): DecodedFrame[] {
 
 // Status pushes look like {"t":1787457039,"dps":{"123":51}}. Keys 101/102 carry RPC traffic on the same topic.
 export function parseDpsPush(payload: Buffer): Record<number, unknown> | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payload.toString('utf8'));
-  } catch {
-    return undefined;
-  }
-  const dps = (parsed as { dps?: unknown } | null)?.dps;
-  if (!dps || typeof dps !== 'object') {
-    return undefined;
-  }
-  const result: Record<number, unknown> = {};
-  for (const [key, value] of Object.entries(dps as Record<string, unknown>)) {
-    const id = Number(key);
-    if (Number.isInteger(id) && !RPC_DPS_KEYS.has(id)) {
-      result[id] = value;
-    }
-  }
-  return result;
+  const parsed = parseV1Payload(payload);
+  return parsed === undefined ? undefined : parsed.dps ?? {};
 }

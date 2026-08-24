@@ -44,7 +44,7 @@ Off by default. Turn on **Control switches (Mow, Pause)** in the plugin settings
 | **Mow** | start a full-lawn mow | send it back to the dock |
 | **Pause** | pause the current job | resume it |
 
-The switches always show the mower's real state, so a job started from the Roborock app reads as Mow on, and a finished job reads off. A command that the mower rejects (or that times out) shows as an error in Home and the switch keeps its true value.
+The switches always show the mower's real state, so a job started from the Roborock app reads as Mow on, and a finished job reads off. A paused or rain-delayed job still counts as Mow on — turning Mow off then cancels it and docks the mower. A command that the mower rejects (or that times out) shows as an error in Home and the switch keeps its true value.
 
 Siri: "turn on RockMow Mow", "turn on RockMow Pause". Automations: "when everyone leaves → turn on Mow", "when rain is detected → turn off Mow".
 

@@ -267,7 +267,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
   private track(platformAccessory: PlatformAccessory, device: CachedDevice): TrackedMower {
     const accessory = new MowerAccessory(
       this.api.hap, platformAccessory, this.log, this.sensorOptions(),
-      (action) => this.command(device, action),
+      (action) => this.command(device.duid, action), // by duid: tracked.device is replaced on every sync
     );
     accessory.setInformation({ model: device.model, serial: device.sn, firmware: device.fv });
     const tracked: TrackedMower = { device, online: true, platformAccessory, accessory, dps: {} };
@@ -399,15 +399,17 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
   }
 
   // The switch's set handler resolves only when the mower acknowledged; sensors then follow via the push.
-  private async command(device: CachedDevice, action: MowerAction): Promise<void> {
+  private async command(duid: string, action: MowerAction): Promise<void> {
     if (!this.mqtt) {
       throw new Error('Roborock MQTT is not running.');
     }
-    const reply = await this.mqtt.request(device.duid, 'remote_pb', remotePbParams(action, this.now()));
+    // params as a thunk: the RemoteMsg id is stamped when the command actually goes out, not when it queued
+    const reply = await this.mqtt.request(duid, 'remote_pb', () => remotePbParams(action, this.now()));
     if (!isOk(reply)) {
       throw new Error(`Unexpected reply: ${JSON.stringify(reply)}`);
     }
-    this.log.info(`${device.name}: ${ACTION_LABELS[action]} command acknowledged`);
+    const name = this.mowers.get(duid)?.device.name ?? duid;
+    this.log.info(`${name}: ${ACTION_LABELS[action]} command acknowledged`);
   }
 
   private applyDps(tracked: TrackedMower, update: Record<string | number, unknown>, source: 'push' | 'cloud'): void {

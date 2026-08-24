@@ -52,6 +52,7 @@ export interface DerivedState {
   paused: boolean;
   fault: boolean;
   attention: boolean;
+  jobActive: boolean;
   battery?: number;
   lowBattery: boolean;
   mowState?: number;
@@ -84,6 +85,8 @@ export function deriveMowerState(dps: Dps): DerivedState {
     paused: PAUSED_STATES.has(state),
     fault,
     attention: fault || EMERGENCY_STOP_STATES.has(state),
+    // DPS 132 is set on the start push and cleared on the end push — through pauses and mid-job rain docks.
+    jobActive: (num(dps[DPS.MOW_START_TYPE]) ?? 0) !== 0,
     battery,
     lowBattery: battery !== undefined && battery <= LOW_BATTERY_PERCENT,
     mowState,

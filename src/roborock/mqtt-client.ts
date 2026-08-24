@@ -2,7 +2,7 @@ import mqtt, { type MqttClient } from 'mqtt';
 
 import { md5hex, randomAlphanumeric } from './crypto.js';
 import type { RRiot } from './types.js';
-import { decodeFrames, encodeV1Frame, parseDpsPush, parseRpcResponse, PROTOCOL_DPS_PUSH, PROTOCOL_RPC_REQUEST, type RpcResponse } from './v1-protocol.js';
+import { decodeFrames, encodeV1Frame, parseV1Payload, PROTOCOL_DPS_PUSH, PROTOCOL_RPC_REQUEST, type RpcResponse } from './v1-protocol.js';
 
 export interface MqttCredentials {
   url: string;
@@ -45,6 +45,16 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+interface QueuedCommand {
+  start: () => void;
+  cancel: (reason: string) => void;
+}
+
+interface CommandQueue {
+  running: boolean;
+  queued?: QueuedCommand;
+}
+
 export class RoborockMqtt {
   private client?: MqttClient;
   private readonly subscriptions = new Map<string, Subscription>();
@@ -52,8 +62,8 @@ export class RoborockMqtt {
   private lastConnected = false;
   private resubscribeTimer?: NodeJS.Timeout;
   private lastRefusalRestart = 0;
-  private readonly pendingRequests = new Map<number, PendingRequest>();
-  private readonly requestQueues = new Map<string, Promise<unknown>>();
+  private readonly pendingRequests = new Map<string, PendingRequest>();
+  private readonly commandQueues = new Map<string, CommandQueue>();
 
   constructor(
     private readonly rriot: RRiot,
@@ -127,6 +137,7 @@ export class RoborockMqtt {
   unsubscribe(duid: string): void {
     if (this.subscriptions.delete(duid)) {
       this.client?.unsubscribe(this.topicFor(duid));
+      this.rejectPending('Mower unsubscribed.', duid);
     }
   }
 
@@ -152,14 +163,40 @@ export class RoborockMqtt {
     this.start();
   }
 
-  // One command at a time per mower — the broker and firmware tolerate little concurrency, and racing a dock
-  // against a mow from two automations must resolve in a defined order.
+  // One command at a time per mower, latest wins: while one is on the wire at most one more waits, and a newer
+  // command replaces the waiting one — stale intents must never replay against the physical mower minutes later.
   request(duid: string, method: string, params: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
-    const queue = this.requestQueues.get(duid) ?? Promise.resolve();
-    const run = () => this.requestNow(duid, method, params, timeoutMs);
-    const result = queue.then(run, run);
-    this.requestQueues.set(duid, result.catch(() => undefined));
-    return result;
+    return new Promise<unknown>((resolve, reject) => {
+      const queue = this.commandQueues.get(duid) ?? { running: false };
+      this.commandQueues.set(duid, queue);
+      const job: QueuedCommand = {
+        start: () => this.requestNow(duid, method, params, timeoutMs)
+          .then(resolve, reject)
+          .finally(() => this.onCommandSettled(duid)),
+        cancel: (reason) => reject(new Error(reason)),
+      };
+      if (queue.running) {
+        queue.queued?.cancel('Superseded by a newer command.');
+        queue.queued = job;
+      } else {
+        queue.running = true;
+        job.start();
+      }
+    });
+  }
+
+  private onCommandSettled(duid: string): void {
+    const queue = this.commandQueues.get(duid);
+    if (!queue) {
+      return;
+    }
+    const next = queue.queued;
+    queue.queued = undefined;
+    if (next) {
+      next.start();
+    } else {
+      this.commandQueues.delete(duid);
+    }
   }
 
   private requestNow(duid: string, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
@@ -173,20 +210,22 @@ export class RoborockMqtt {
     }
     const id = 10_000 + Math.floor(Math.random() * 22_767);
     const timestamp = Math.floor(Date.now() / 1000);
-    const payload = JSON.stringify({ dps: { '101': JSON.stringify({ id, method, params }) }, t: timestamp });
+    const resolvedParams = typeof params === 'function' ? (params as () => unknown)() : params;
+    const payload = JSON.stringify({ dps: { '101': JSON.stringify({ id, method, params: resolvedParams }) }, t: timestamp });
     const frame = encodeV1Frame(
       PROTOCOL_RPC_REQUEST, timestamp, payload, subscription.localKey,
       Math.floor(Math.random() * 0x7fffffff), Math.floor(Math.random() * 0x7fffffff),
     );
     return new Promise<unknown>((resolve, reject) => {
+      const key = `${duid}:${id}`;
       const timer = setTimeout(() => {
-        this.pendingRequests.delete(id);
+        this.pendingRequests.delete(key);
         reject(new Error(`Roborock ${method} timed out after ${timeoutMs / 1000}s.`));
       }, timeoutMs);
       timer.unref?.();
-      this.pendingRequests.set(id, { resolve, reject, timer });
+      this.pendingRequests.set(key, { resolve, reject, timer });
       client.publish(this.inTopicFor(duid), frame, { qos: 0 }, (error) => {
-        if (error && this.pendingRequests.delete(id)) {
+        if (error && this.pendingRequests.delete(key)) {
           clearTimeout(timer);
           reject(error);
         }
@@ -194,12 +233,14 @@ export class RoborockMqtt {
     });
   }
 
-  private settleRequest(reply: RpcResponse): void {
-    const pending = this.pendingRequests.get(reply.id);
+  // Ids are only unique per mower; the account topic also carries other clients' replies.
+  private settleRequest(duid: string, reply: RpcResponse): void {
+    const key = `${duid}:${reply.id}`;
+    const pending = this.pendingRequests.get(key);
     if (!pending) {
       return; // another client's request on the shared topic
     }
-    this.pendingRequests.delete(reply.id);
+    this.pendingRequests.delete(key);
     clearTimeout(pending.timer);
     if (reply.error !== undefined) {
       pending.reject(new Error(`Roborock rejected the command: ${JSON.stringify(reply.error)}`));
@@ -208,12 +249,22 @@ export class RoborockMqtt {
     }
   }
 
-  private rejectPending(reason: string): void {
-    for (const pending of this.pendingRequests.values()) {
+  private rejectPending(reason: string, duid?: string): void {
+    for (const [key, pending] of this.pendingRequests) {
+      if (duid !== undefined && !key.startsWith(`${duid}:`)) {
+        continue;
+      }
+      this.pendingRequests.delete(key);
       clearTimeout(pending.timer);
       pending.reject(new Error(reason));
     }
-    this.pendingRequests.clear();
+    for (const [queueDuid, queue] of this.commandQueues) {
+      if (duid !== undefined && queueDuid !== duid) {
+        continue;
+      }
+      queue.queued?.cancel(reason);
+      this.commandQueues.delete(queueDuid);
+    }
   }
 
   onConnectionChange(listener: (connected: boolean) => void): void {
@@ -255,14 +306,12 @@ export class RoborockMqtt {
         this.log.debug(`MQTT ${duid}: protocol ${frame.protocol}, ${frame.payload.length} bytes`);
         continue;
       }
-      const reply = parseRpcResponse(frame.payload);
-      if (reply) {
-        this.settleRequest(reply);
-        continue;
+      const parsed = parseV1Payload(frame.payload);
+      if (parsed?.rpc) {
+        this.settleRequest(duid, parsed.rpc);
       }
-      const dps = parseDpsPush(frame.payload);
-      if (dps && Object.keys(dps).length > 0) {
-        subscription.onDps(dps);
+      if (parsed?.dps) {
+        subscription.onDps(parsed.dps);
       }
     }
   }

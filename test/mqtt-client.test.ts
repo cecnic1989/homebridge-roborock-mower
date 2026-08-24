@@ -26,6 +26,9 @@ class FakeClient extends EventEmitter {
     cb?.(this.failSubscribe ? new Error('suback refused') : undefined);
     return this;
   }
+  unsubscribe() {
+    return this;
+  }
   publish(topic: string, payload: Buffer, _opts: unknown, cb?: (err?: Error) => void) {
     this.published.push({ topic, payload });
     cb?.();
@@ -90,6 +93,45 @@ describe('RoborockMqtt RPC', () => {
     assert.deepEqual(await pending, ['ok']);
   });
 
+  test('a frame carrying both an RPC reply and status dps delivers both', async () => {
+    const client = new FakeClient();
+    const mqtt = new RoborockMqtt(rriot, silentLog, ((() => client) as unknown) as never);
+    const pushes: Record<number, unknown>[] = [];
+    mqtt.subscribe('duid-1', 'localkey', (dps) => pushes.push(dps));
+    mqtt.start();
+    client.connected = true;
+    client.emit('connect');
+    const pending = mqtt.request('duid-1', 'remote_pb', { app_button: 'MOW_GLOBAL' });
+    await drain();
+    const { rpc } = decodeRequest(client);
+    const ts = 1787523488;
+    client.emit('message', OUT_TOPIC, buildV1Frame(102, ts,
+      JSON.stringify({ t: ts, dps: { 123: 52, 102: JSON.stringify({ id: rpc.id, result: ['ok'] }) } }), 'localkey'));
+    assert.deepEqual(await pending, ['ok']);
+    assert.deepEqual(pushes, [{ 123: 52 }], 'the status half of the frame must not be swallowed by the reply');
+  });
+
+  test('a reply on another mower of the account cannot settle this one, even with the same id', async () => {
+    const { client, mqtt } = liveMqtt();
+    mqtt.subscribe('duid-2', 'otherkey', () => {});
+    const pending = mqtt.request('duid-1', 'remote_pb', { app_button: 'CHARGE' });
+    await drain();
+    const { rpc } = decodeRequest(client);
+    const ts = 1787523488;
+    client.emit('message', 'rr/m/o/u1/b7b04791/duid-2', buildV1Frame(102, ts,
+      JSON.stringify({ t: ts, dps: { 102: JSON.stringify({ id: rpc.id, result: ['nope'] }) } }), 'otherkey'));
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    }, () => {
+      settled = true;
+    });
+    await drain();
+    assert.equal(settled, false, 'a different mower answered; ours is still pending');
+    reply(client, { id: rpc.id, result: ['ok'] });
+    assert.deepEqual(await pending, ['ok']);
+  });
+
   test('a reply carrying an error rejects; a foreign reply is ignored', async () => {
     const { client, mqtt } = liveMqtt();
     const pending = mqtt.request('duid-1', 'remote_pb', { type: 'APP_BUTTON', app_button: 'MOW_PAUSE' });
@@ -139,6 +181,30 @@ describe('RoborockMqtt RPC', () => {
     assert.equal(rpc.params.app_button, 'MOW_RESUME');
     reply(client, { id: rpc.id, result: ['ok'] });
     await second;
+  });
+
+  test('rapid re-commands supersede a queued one instead of replaying stale intents later', async () => {
+    const { client, mqtt } = liveMqtt();
+    const first = mqtt.request('duid-1', 'remote_pb', { app_button: 'MOW_GLOBAL' });
+    const second = mqtt.request('duid-1', 'remote_pb', { app_button: 'CHARGE' });
+    const third = mqtt.request('duid-1', 'remote_pb', { app_button: 'MOW_GLOBAL' });
+    await drain();
+    await assert.rejects(second, /superseded/i, 'the queued dock was replaced by a newer command');
+    reply(client, { id: decodeRequest(client).rpc.id, result: ['ok'] });
+    await first;
+    await drain();
+    assert.equal(client.published.length, 2, 'only the newest queued command went out');
+    reply(client, { id: decodeRequest(client, 1).rpc.id, result: ['ok'] });
+    await third;
+  });
+
+  test('unsubscribing a mower fails its in-flight command at once instead of a 10s spinner', async () => {
+    const { mqtt } = liveMqtt();
+    const pending = mqtt.request('duid-1', 'remote_pb', { app_button: 'CHARGE' });
+    pending.catch(() => undefined);
+    await drain();
+    mqtt.unsubscribe('duid-1');
+    await assert.rejects(pending, /no longer|removed|unsubscribed/i);
   });
 
   test('restart() rejects a pending request instead of leaving it hanging', async () => {
