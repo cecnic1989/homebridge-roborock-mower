@@ -172,7 +172,7 @@ export class RoborockMqtt {
       const job: QueuedCommand = {
         start: () => this.requestNow(duid, method, params, timeoutMs)
           .then(resolve, reject)
-          .finally(() => this.onCommandSettled(duid)),
+          .finally(() => this.onCommandSettled(duid, queue)),
         cancel: (reason) => reject(new Error(reason)),
       };
       if (queue.running) {
@@ -185,10 +185,9 @@ export class RoborockMqtt {
     });
   }
 
-  private onCommandSettled(duid: string): void {
-    const queue = this.commandQueues.get(duid);
-    if (!queue) {
-      return;
+  private onCommandSettled(duid: string, queue: CommandQueue): void {
+    if (this.commandQueues.get(duid) !== queue) {
+      return; // the queue was torn down (stop/restart/unsubscribe) while this command was settling
     }
     const next = queue.queued;
     queue.queued = undefined;
