@@ -2,7 +2,7 @@ import mqtt, { type MqttClient } from 'mqtt';
 
 import { md5hex, randomAlphanumeric } from './crypto.js';
 import type { RRiot } from './types.js';
-import { decodeFrames, parseDpsPush, PROTOCOL_DPS_PUSH } from './v1-protocol.js';
+import { decodeFrames, encodeV1Frame, parseDpsPush, parseRpcResponse, PROTOCOL_DPS_PUSH, PROTOCOL_RPC_REQUEST, type RpcResponse } from './v1-protocol.js';
 
 export interface MqttCredentials {
   url: string;
@@ -37,6 +37,13 @@ interface Subscription {
 
 const RESUBSCRIBE_INTERVAL_MS = 15 * 60_000; // the broker can silently drop a subscription; SUBSCRIBE is idempotent
 const REFUSAL_RESTART_COOLDOWN_MS = 60_000; // a broker that keeps refusing must not spin us into a restart loop
+const REQUEST_TIMEOUT_MS = 10_000;
+
+interface PendingRequest {
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
 
 export class RoborockMqtt {
   private client?: MqttClient;
@@ -45,6 +52,8 @@ export class RoborockMqtt {
   private lastConnected = false;
   private resubscribeTimer?: NodeJS.Timeout;
   private lastRefusalRestart = 0;
+  private readonly pendingRequests = new Map<number, PendingRequest>();
+  private readonly requestQueues = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly rriot: RRiot,
@@ -104,6 +113,7 @@ export class RoborockMqtt {
     this.client = undefined;
     this.lastConnected = false;
     clearInterval(this.resubscribeTimer);
+    this.rejectPending('Roborock MQTT connection closed.');
     client?.end(true);
   }
 
@@ -136,9 +146,74 @@ export class RoborockMqtt {
     const old = this.client;
     this.client = undefined;
     clearInterval(this.resubscribeTimer);
+    this.rejectPending('Roborock MQTT connection closed.');
     old?.end(true);
     this.emitConnection(false);
     this.start();
+  }
+
+  // One command at a time per mower — the broker and firmware tolerate little concurrency, and racing a dock
+  // against a mow from two automations must resolve in a defined order.
+  request(duid: string, method: string, params: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
+    const queue = this.requestQueues.get(duid) ?? Promise.resolve();
+    const run = () => this.requestNow(duid, method, params, timeoutMs);
+    const result = queue.then(run, run);
+    this.requestQueues.set(duid, result.catch(() => undefined));
+    return result;
+  }
+
+  private requestNow(duid: string, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    const client = this.client;
+    const subscription = this.subscriptions.get(duid);
+    if (!client?.connected) {
+      return Promise.reject(new Error('Roborock MQTT is not connected.'));
+    }
+    if (!subscription) {
+      return Promise.reject(new Error(`No MQTT subscription for ${duid}.`));
+    }
+    const id = 10_000 + Math.floor(Math.random() * 22_767);
+    const timestamp = Math.floor(Date.now() / 1000);
+    const payload = JSON.stringify({ dps: { '101': JSON.stringify({ id, method, params }) }, t: timestamp });
+    const frame = encodeV1Frame(
+      PROTOCOL_RPC_REQUEST, timestamp, payload, subscription.localKey,
+      Math.floor(Math.random() * 0x7fffffff), Math.floor(Math.random() * 0x7fffffff),
+    );
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`Roborock ${method} timed out after ${timeoutMs / 1000}s.`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pendingRequests.set(id, { resolve, reject, timer });
+      client.publish(this.inTopicFor(duid), frame, { qos: 0 }, (error) => {
+        if (error && this.pendingRequests.delete(id)) {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+    });
+  }
+
+  private settleRequest(reply: RpcResponse): void {
+    const pending = this.pendingRequests.get(reply.id);
+    if (!pending) {
+      return; // another client's request on the shared topic
+    }
+    this.pendingRequests.delete(reply.id);
+    clearTimeout(pending.timer);
+    if (reply.error !== undefined) {
+      pending.reject(new Error(`Roborock rejected the command: ${JSON.stringify(reply.error)}`));
+    } else {
+      pending.resolve(reply.result);
+    }
+  }
+
+  private rejectPending(reason: string): void {
+    for (const pending of this.pendingRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.pendingRequests.clear();
   }
 
   onConnectionChange(listener: (connected: boolean) => void): void {
@@ -147,6 +222,10 @@ export class RoborockMqtt {
 
   private topicFor(duid: string): string {
     return `rr/m/o/${this.rriot.u}/${mqttCredentials(this.rriot).username}/${duid}`;
+  }
+
+  private inTopicFor(duid: string): string {
+    return `rr/m/i/${this.rriot.u}/${mqttCredentials(this.rriot).username}/${duid}`;
   }
 
   // A refused suback means the session is broken (the broker acknowledged the request and said no), so a fresh
@@ -174,6 +253,11 @@ export class RoborockMqtt {
     for (const frame of decodeFrames(payload, subscription.localKey)) {
       if (frame.protocol !== PROTOCOL_DPS_PUSH) {
         this.log.debug(`MQTT ${duid}: protocol ${frame.protocol}, ${frame.payload.length} bytes`);
+        continue;
+      }
+      const reply = parseRpcResponse(frame.payload);
+      if (reply) {
+        this.settleRequest(reply);
         continue;
       }
       const dps = parseDpsPush(frame.payload);

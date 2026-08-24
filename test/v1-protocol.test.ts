@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-import { decodeFrames, encodeTimestamp, parseDpsPush } from '../src/roborock/v1-protocol.js';
+import { decodeFrames, encodeTimestamp, encodeV1Frame, parseDpsPush } from '../src/roborock/v1-protocol.js';
 import { buildV1Frame } from './frame-builder.js';
 
 const localKey = 'abcdefghijklmnop';
@@ -45,5 +45,17 @@ describe('parseDpsPush', () => {
   test('returns undefined for non-DPS payloads (protobuf, map, garbage)', () => {
     assert.equal(parseDpsPush(Buffer.from('PB')), undefined);
     assert.equal(parseDpsPush(Buffer.from('{"result":"ok"}')), undefined);
+  });
+});
+
+describe('encodeV1Frame', () => {
+  test('what we encode, we decode: protocol, timestamp, seq and payload survive the round trip', () => {
+    const payload = '{"dps":{"101":"{\\"id\\":1}"},"t":1787523488}';
+    const frames = decodeFrames(encodeV1Frame(101, 1787523488, payload, 'localkey', 42, 7), 'localkey');
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].protocol, 101);
+    assert.equal(frames[0].timestamp, 1787523488);
+    assert.equal(frames[0].seq, 42);
+    assert.equal(frames[0].payload.toString('utf8'), payload);
   });
 });

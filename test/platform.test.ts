@@ -9,6 +9,7 @@ import { RoborockMowerPlatform } from '../src/platform.js';
 import { readStatus } from '../src/roborock/session-store.js';
 import type { HomeData, StoredSession } from '../src/roborock/types.js';
 import { PLATFORM_NAME } from '../src/settings.js';
+import { decodeFrames } from '../src/roborock/v1-protocol.js';
 import { fakeFetch, type RecordedRequest } from './fake-fetch.js';
 import { fakeHap, FakePlatformAccessory } from './fake-hap.js';
 import { buildV1Frame } from './frame-builder.js';
@@ -34,6 +35,12 @@ class FakeMqttClient extends EventEmitter {
   }
   unsubscribe(topic: string) {
     this.unsubscriptions.push(topic);
+    return this;
+  }
+  published: { topic: string; payload: Buffer }[] = [];
+  publish(topic: string, payload: Buffer, _opts: unknown, cb?: (err?: Error) => void) {
+    this.published.push({ topic, payload });
+    cb?.();
     return this;
   }
   end() {
@@ -325,6 +332,44 @@ describe('RoborockMowerPlatform re-sync', () => {
     stored.session = { ...session, userData: { token: 'tok2', rriot: { ...session.userData.rriot, u: 'u2' } } };
     await resync();
     assert.equal((await readStatus(storagePath))?.lastError, undefined);
+  });
+});
+
+describe('RoborockMowerPlatform controls', () => {
+  const decodeRpc = (client: FakeMqttClient) => {
+    const [frame] = decodeFrames(client.published[0].payload, 'localkey');
+    const envelope = JSON.parse(frame.payload.toString('utf8')) as { dps: Record<string, string> };
+    return JSON.parse(envelope.dps['101']) as { id: number; params: { app_button: string } };
+  };
+
+  test('flipping the Mow switch publishes MOW_GLOBAL over remote_pb and resolves on the ok reply', async () => {
+    const { platform, accessories, client } = start({ session, config: { exposeControls: true } });
+    await platform.whenStarted();
+    connect(client);
+    const mow = accessories[0].find(fakeHap.Service.Switch, 'mow');
+    const setPromise = mow!.triggerSet('On', true);
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve(); // let the serialized request reach the wire
+    }
+    const rpc = decodeRpc(client);
+    assert.equal(rpc.params.app_button, 'MOW_GLOBAL');
+    assert.equal(client.published[0].topic, 'rr/m/i/u1/b7b04791/mower-duid');
+    const ts = 1787523488;
+    client.emit('message', TOPIC, buildV1Frame(102, ts, JSON.stringify({ t: ts, dps: { 102: JSON.stringify({ id: rpc.id, result: ['ok'] }) } }), 'localkey'));
+    await setPromise;
+    assert.equal(mow?.value('On'), true);
+  });
+
+  test('without config the switches do not exist; with MQTT down the command fails cleanly', async () => {
+    const plain = start({ session });
+    await plain.platform.whenStarted();
+    assert.equal(plain.accessories[0].services.some((s) => s.type === 'Switch'), false);
+
+    const { platform, accessories, client } = start({ session, config: { exposeControls: true } });
+    await platform.whenStarted();
+    // broker never connected
+    await assert.rejects(accessories[0].find(fakeHap.Service.Switch, 'mow')!.triggerSet('On', true));
+    assert.equal(client.published.length, 0);
   });
 });
 

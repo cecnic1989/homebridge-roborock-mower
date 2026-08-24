@@ -2,6 +2,7 @@ import type { API, Characteristic, DynamicPlatformPlugin, Logging, PlatformAcces
 import type mqtt from 'mqtt';
 
 import { MowerAccessory, type SensorOptions } from './mower/accessory.js';
+import { ACTION_LABELS, isOk, type MowerAction, remotePbParams } from './mower/commands.js';
 import { type DerivedState, type Dps, deriveMowerState, describeAttention, describeMowState } from './mower/state.js';
 import { findMowers, type MowerDevice } from './roborock/mower.js';
 import { RoborockMqtt } from './roborock/mqtt-client.js';
@@ -19,6 +20,7 @@ export interface RoborockMowerConfig extends PlatformConfig {
   exposeAttention?: boolean;
   exposeBattery?: boolean;
   faultIndicator?: boolean;
+  exposeControls?: boolean;
   sensorDebounceSeconds?: number;
 }
 
@@ -156,6 +158,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       attention: c.exposeAttention ?? true,
       battery: c.exposeBattery ?? true,
       faultIndicator: c.faultIndicator ?? true,
+      controls: c.exposeControls ?? false,
       debounceSeconds: numberOption(c.sensorDebounceSeconds, 3, 0, 60),
     };
   }
@@ -262,7 +265,10 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
   }
 
   private track(platformAccessory: PlatformAccessory, device: CachedDevice): TrackedMower {
-    const accessory = new MowerAccessory(this.api.hap, platformAccessory, this.log, this.sensorOptions());
+    const accessory = new MowerAccessory(
+      this.api.hap, platformAccessory, this.log, this.sensorOptions(),
+      (action) => this.command(device, action),
+    );
     accessory.setInformation({ model: device.model, serial: device.sn, firmware: device.fv });
     const tracked: TrackedMower = { device, online: true, platformAccessory, accessory, dps: {} };
     this.mowers.set(device.duid, tracked);
@@ -390,6 +396,18 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [tracked.platformAccessory]);
     this.accessories.delete(tracked.platformAccessory.UUID);
     this.mowers.delete(tracked.device.duid);
+  }
+
+  // The switch's set handler resolves only when the mower acknowledged; sensors then follow via the push.
+  private async command(device: CachedDevice, action: MowerAction): Promise<void> {
+    if (!this.mqtt) {
+      throw new Error('Roborock MQTT is not running.');
+    }
+    const reply = await this.mqtt.request(device.duid, 'remote_pb', remotePbParams(action, this.now()));
+    if (!isOk(reply)) {
+      throw new Error(`Unexpected reply: ${JSON.stringify(reply)}`);
+    }
+    this.log.info(`${device.name}: ${ACTION_LABELS[action]} command acknowledged`);
   }
 
   private applyDps(tracked: TrackedMower, update: Record<string | number, unknown>, source: 'push' | 'cloud'): void {

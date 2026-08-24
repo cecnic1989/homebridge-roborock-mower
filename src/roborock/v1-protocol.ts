@@ -1,4 +1,4 @@
-import { createDecipheriv, createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 
 // Wire format of Roborock "1.0" devices over cloud MQTT (big-endian):
@@ -9,6 +9,7 @@ const SALT = 'TXdfu$jyZ#TZHsg4';
 const RPC_DPS_KEYS = new Set([101, 102]);
 
 export const PROTOCOL_DPS_PUSH = 102;
+export const PROTOCOL_RPC_REQUEST = 101;
 
 export interface DecodedFrame {
   protocol: number;
@@ -31,6 +32,44 @@ function messageKey(timestamp: number, localKey: string): Buffer {
 function decrypt(payload: Buffer, localKey: string, timestamp: number): Buffer {
   const decipher = createDecipheriv('aes-128-ecb', messageKey(timestamp, localKey), null);
   return Buffer.concat([decipher.update(payload), decipher.final()]);
+}
+
+// Builds one "1.0" frame the mower will accept: header, AES-128-ECB body keyed off the timestamp, CRC32 trailer.
+export function encodeV1Frame(protocol: number, timestamp: number, json: string, localKey: string, seq = 0, random = 0): Buffer {
+  const cipher = createCipheriv('aes-128-ecb', messageKey(timestamp, localKey), null);
+  const payload = Buffer.concat([cipher.update(json, 'utf8'), cipher.final()]);
+  const header = Buffer.alloc(HEADER_LENGTH);
+  header.write('1.0', 0, 'latin1');
+  header.writeUInt32BE(seq, 3);
+  header.writeUInt32BE(random, 7);
+  header.writeUInt32BE(timestamp, 11);
+  header.writeUInt16BE(protocol, 15);
+  header.writeUInt16BE(payload.length, 17);
+  const body = Buffer.concat([header, payload]);
+  const crc = Buffer.alloc(CRC_LENGTH);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([body, crc]);
+}
+
+export interface RpcResponse {
+  id: number;
+  result?: unknown;
+  error?: unknown;
+}
+
+// The RPC reply rides the same 102 frames as status pushes, as a JSON string under dps key "102".
+export function parseRpcResponse(payload: Buffer): RpcResponse | undefined {
+  try {
+    const parsed = JSON.parse(payload.toString('utf8')) as { dps?: Record<string, unknown> };
+    const reply = parsed?.dps?.['102'];
+    if (typeof reply !== 'string') {
+      return undefined;
+    }
+    const body = JSON.parse(reply) as RpcResponse;
+    return typeof body?.id === 'number' ? body : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // One MQTT message can carry several frames; frames with a bad CRC or undecryptable payload are skipped.

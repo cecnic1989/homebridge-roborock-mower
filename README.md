@@ -18,7 +18,7 @@ Homebridge plugin for Roborock RockMow robot lawn mowers. Exposes your mower to 
 - **Battery** level, charging state, low-battery flag
 - **Fault indicator** on every sensor when the mower reports an error
 
-Planned: start / pause / return-to-dock controls.
+- **Mow and Pause switches** (optional) to start, dock, pause and resume from Home automations and Siri
 
 ## Automations
 
@@ -34,6 +34,21 @@ Each state is a contact sensor so the Home app can trigger on it ("A Sensor Dete
 
 Example for a dock inside a garage: *Docked opens → open garage*, *Mowing opens → close garage*, *Returning opens → open garage*, *Docked closes → close garage*.
 Prefer **Docked opens** over *Leaving opens* for the departure trigger: both fire on the same push, but Docked can only open once per trip. The mower starts driving ~1.5 s after that push, so if the door needs longer, add a time-based automation on the mowing schedule as well.
+
+## Controls
+
+Off by default. Turn on **Control switches (Mow, Pause)** in the plugin settings and restart Homebridge to add two switches:
+
+| Switch | Turn on | Turn off |
+|---|---|---|
+| **Mow** | start a full-lawn mow | send it back to the dock |
+| **Pause** | pause the current job | resume it |
+
+The switches always show the mower's real state, so a job started from the Roborock app reads as Mow on, and a finished job reads off. A command that the mower rejects (or that times out) shows as an error in Home and the switch keeps its true value.
+
+Siri: "turn on RockMow Mow", "turn on RockMow Pause". Automations: "when everyone leaves → turn on Mow", "when rain is detected → turn off Mow".
+
+> **Scenes:** "turn everything on" (a scene, or Siri) flips every switch in the room — including Mow. Keep the switches out of scenes, or leave controls off if you use all-on scenes.
 
 **Notifications:** no automation needed — in the Home app open the *Needs Attention* sensor → *Status and Notifications* → turn on *Notify when opens*. It opens on the push that reports the problem (no debounce). Pauses made from the app do not trigger it.
 
@@ -66,6 +81,7 @@ Optional fields:
 |---|---|---|
 | `exposeDocked`, `exposeLeaving`, `exposeMowing`, `exposeReturning` | `true` | Which state sensors to create |
 | `exposeAttention` | `true` | Needs Attention sensor (errors, faults, emergency stop) |
+| `exposeControls` | `false` | Mow and Pause switches |
 | `exposeBattery` | `true` | Battery service |
 | `faultIndicator` | `true` | Set StatusFault on the sensors when the mower reports an error |
 | `sensorDebounceSeconds` | `3` | How long a state must hold before its sensor flips (0–60) |

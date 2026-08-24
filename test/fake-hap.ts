@@ -10,7 +10,13 @@ export interface UpdateCall {
 
 class FakeCharacteristic {
   value: unknown;
+  setHandler?: (value: unknown) => Promise<void> | void;
   constructor(readonly name: string) {}
+
+  onSet(handler: (value: unknown) => Promise<void> | void): this {
+    this.setHandler = handler;
+    return this;
+  }
 }
 
 export class FakeService {
@@ -42,6 +48,16 @@ export class FakeService {
   value(name: string): unknown {
     return this.characteristics.get(name)?.value;
   }
+
+  // Mimics a HomeKit write: the handler runs first; only a successful one commits the value.
+  async triggerSet(name: string, value: unknown): Promise<void> {
+    const characteristic = this.getCharacteristic({ name });
+    if (!characteristic.setHandler) {
+      throw new Error(`no onSet handler for ${name}`);
+    }
+    await characteristic.setHandler(value);
+    characteristic.value = value;
+  }
 }
 
 function serviceType(name: string) {
@@ -52,13 +68,23 @@ function characteristic(name: string, constants: Record<string, number> = {}) {
   return { name, ...constants };
 }
 
+export class FakeHapStatusError extends Error {
+  constructor(readonly hapStatus: number) {
+    super(`HapStatusError ${hapStatus}`);
+  }
+}
+
 export const fakeHap = {
   Service: {
     AccessoryInformation: serviceType('AccessoryInformation'),
     ContactSensor: serviceType('ContactSensor'),
     Battery: serviceType('Battery'),
+    Switch: serviceType('Switch'),
   },
+  HapStatusError: FakeHapStatusError,
+  HAPStatus: { SERVICE_COMMUNICATION_FAILURE: -70402 },
   Characteristic: {
+    On: characteristic('On'),
     Manufacturer: characteristic('Manufacturer'),
     Model: characteristic('Model'),
     SerialNumber: characteristic('SerialNumber'),

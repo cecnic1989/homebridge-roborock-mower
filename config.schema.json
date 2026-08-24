@@ -52,6 +52,12 @@
         "type": "boolean",
         "default": true
       },
+      "exposeControls": {
+        "title": "Control switches (Mow, Pause)",
+        "type": "boolean",
+        "default": false,
+        "description": "Adds Mow and Pause switches. Off by default: a Home scene or 'Hey Siri, turn everything on' flips every switch, which would start the mower."
+      },
       "sensorDebounceSeconds": {
         "title": "Sensor debounce (seconds)",
         "type": "integer",
@@ -76,6 +82,13 @@
         "exposeBattery",
         "faultIndicator",
         "sensorDebounceSeconds"
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Controls",
+      "items": [
+        "exposeControls"
       ]
     },
     {

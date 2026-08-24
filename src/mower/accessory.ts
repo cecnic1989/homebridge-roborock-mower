@@ -1,5 +1,6 @@
 import type { API, Logging, PlatformAccessory, Service } from 'homebridge';
 
+import type { MowerAction } from './commands.js';
 import type { DerivedState } from './state.js';
 
 export interface SensorOptions {
@@ -10,6 +11,7 @@ export interface SensorOptions {
   attention: boolean;
   battery: boolean;
   faultIndicator: boolean;
+  controls: boolean;
   debounceSeconds: number;
 }
 
@@ -20,7 +22,14 @@ export interface DeviceInformation {
 }
 
 type SensorKey = 'docked' | 'leaving' | 'mowing' | 'returning' | 'attention';
-type Hap = Pick<API['hap'], 'Service' | 'Characteristic'>;
+type SwitchKey = 'mow' | 'pause';
+type Hap = Pick<API['hap'], 'Service' | 'Characteristic' | 'HapStatusError' | 'HAPStatus'>;
+
+// on/off map to opposite commands, and the displayed value always derives from the mower's own state.
+const SWITCH_DEFS: { key: SwitchKey; label: string; whenOn: MowerAction; whenOff: MowerAction; active: (s: DerivedState) => boolean }[] = [
+  { key: 'mow', label: 'Mow', whenOn: 'mow', whenOff: 'dock', active: (s) => s.leaving || s.mowing },
+  { key: 'pause', label: 'Pause', whenOn: 'pause', whenOff: 'resume', active: (s) => s.paused },
+];
 
 const SENSOR_LABELS: Record<SensorKey, string> = {
   docked: 'Docked', leaving: 'Leaving', mowing: 'Mowing', returning: 'Returning', attention: 'Needs Attention',
@@ -40,6 +49,8 @@ function contactValue(key: SensorKey, active: boolean, c: Hap['Characteristic'])
 
 export class MowerAccessory {
   private readonly sensors = new Map<SensorKey, Service>();
+  private readonly switches = new Map<SwitchKey, Service>();
+  private readonly switchApplied = new Map<SwitchKey, boolean>();
   private readonly battery?: Service;
   private readonly applied = new Map<SensorKey, boolean>();
   private readonly pending = new Map<SensorKey, { value: boolean; timer: NodeJS.Timeout }>();
@@ -52,6 +63,7 @@ export class MowerAccessory {
     readonly accessory: PlatformAccessory,
     private readonly log: Logging,
     private readonly options: SensorOptions,
+    private readonly onCommand?: (action: MowerAction) => Promise<void>,
   ) {
     const { Service, Characteristic } = hap;
     this.baseName = accessory.displayName;
@@ -87,6 +99,38 @@ export class MowerAccessory {
     } else if (existingBattery) {
       accessory.removeService(existingBattery);
     }
+
+    for (const definition of SWITCH_DEFS) {
+      const existing = accessory.getServiceById(Service.Switch, definition.key);
+      if (!options.controls || !this.onCommand) {
+        if (existing) {
+          accessory.removeService(existing);
+        }
+        continue;
+      }
+      let service = existing;
+      if (!service) {
+        const name = `${this.baseName} ${definition.label}`;
+        service = accessory.addService(Service.Switch, name, definition.key);
+        service.addOptionalCharacteristic(Characteristic.ConfiguredName);
+        service.setCharacteristic(Characteristic.Name, name);
+        service.setCharacteristic(Characteristic.ConfiguredName, name);
+      }
+      service.getCharacteristic(Characteristic.On)
+        .onSet((value) => this.handleSwitchSet(definition, Boolean(value)));
+      this.switches.set(definition.key, service);
+    }
+  }
+
+  // HomeKit applies the written value only when this resolves; a failure keeps the old value and shows an error.
+  private async handleSwitchSet(definition: (typeof SWITCH_DEFS)[number], value: boolean): Promise<void> {
+    try {
+      await this.onCommand!(value ? definition.whenOn : definition.whenOff);
+      this.switchApplied.set(definition.key, value);
+    } catch (error) {
+      this.log.warn(`${this.baseName}: ${definition.label} ${value ? 'on' : 'off'} failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new this.hap.HapStatusError(this.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
   }
 
   setInformation(info: DeviceInformation): void {
@@ -111,6 +155,15 @@ export class MowerAccessory {
         service.updateCharacteristic(c.ConfiguredName, next);
       }
     }
+    for (const definition of SWITCH_DEFS) {
+      const service = this.switches.get(definition.key);
+      if (service) {
+        service.updateCharacteristic(c.Name, `${displayName} ${definition.label}`);
+        if (service.getCharacteristic(c.ConfiguredName).value === `${previousBase} ${definition.label}`) {
+          service.updateCharacteristic(c.ConfiguredName, `${displayName} ${definition.label}`);
+        }
+      }
+    }
     this.battery?.updateCharacteristic(c.Name, `${displayName} Battery`);
   }
 
@@ -120,6 +173,14 @@ export class MowerAccessory {
         this.applyIfChanged(key, state.attention); // never debounced: a fault must reach the phone on the push that reports it
       } else {
         this.schedule(key, state[key]);
+      }
+    }
+    for (const definition of SWITCH_DEFS) {
+      const service = this.switches.get(definition.key);
+      const value = definition.active(state);
+      if (service && this.switchApplied.get(definition.key) !== value) {
+        this.switchApplied.set(definition.key, value);
+        service.updateCharacteristic(this.hap.Characteristic.On, value);
       }
     }
     this.pushFault(state.fault);

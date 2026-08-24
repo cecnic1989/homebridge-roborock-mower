@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { describe, mock, test } from 'node:test';
 
 import { MowerAccessory, type SensorOptions } from '../src/mower/accessory.js';
+import type { MowerAction } from '../src/mower/commands.js';
 import type { DerivedState } from '../src/mower/state.js';
-import { fakeAccessory, fakeHap, FakePlatformAccessory } from './fake-hap.js';
+import { fakeAccessory, fakeHap, FakeHapStatusError, FakePlatformAccessory } from './fake-hap.js';
 import { silentLog } from './helpers.js';
 
 const allOn: SensorOptions = {
-  docked: true, leaving: true, mowing: true, returning: true, attention: true, battery: true, faultIndicator: true, debounceSeconds: 3,
+  docked: true, leaving: true, mowing: true, returning: true, attention: true, battery: true, faultIndicator: true,
+  controls: false, debounceSeconds: 3,
 };
 
 function state(overrides: Partial<DerivedState> = {}): DerivedState {
@@ -17,10 +19,14 @@ function state(overrides: Partial<DerivedState> = {}): DerivedState {
   };
 }
 
-function build(options: SensorOptions = allOn) {
+function build(options: SensorOptions = allOn, onCommand?: (action: MowerAction) => Promise<void>) {
   const fake = fakeAccessory();
-  const mower = new MowerAccessory(fakeHap as never, fake.accessory, silentLog, options);
+  const mower = new MowerAccessory(fakeHap as never, fake.accessory, silentLog, options, onCommand);
   return { ...fake, mower };
+}
+
+function buildControls(onCommand: (action: MowerAction) => Promise<void>) {
+  return build({ ...allOn, controls: true }, onCommand);
 }
 
 describe('MowerAccessory services', () => {
@@ -108,6 +114,46 @@ describe('MowerAccessory state pushes', () => {
     const sensors = services.filter((s) => s.type === 'ContactSensor');
     assert.equal(sensors.length, 5);
     assert.ok(sensors.every((s) => s.value('StatusActive') === false));
+  });
+});
+
+describe('MowerAccessory controls', () => {
+  test('switches exist only when controls are enabled and a command channel is wired', () => {
+    const { services } = buildControls(async () => {});
+    assert.ok(services.some((s) => s.subtype === 'mow'));
+    assert.ok(services.some((s) => s.subtype === 'pause'));
+    assert.equal(build().services.some((s) => s.type === 'Switch'), false);
+  });
+
+  test('turning Mow on sends mow, off sends dock; Pause maps to pause/resume', async () => {
+    const actions: MowerAction[] = [];
+    const { find } = buildControls(async (action) => {
+      actions.push(action);
+    });
+    await find(fakeHap.Service.Switch, 'mow')?.triggerSet('On', true);
+    await find(fakeHap.Service.Switch, 'mow')?.triggerSet('On', false);
+    await find(fakeHap.Service.Switch, 'pause')?.triggerSet('On', true);
+    await find(fakeHap.Service.Switch, 'pause')?.triggerSet('On', false);
+    assert.deepEqual(actions, ['mow', 'dock', 'pause', 'resume']);
+    assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), false);
+  });
+
+  test('a failed command surfaces a HapStatusError and the switch keeps its truthful value', async () => {
+    const { mower, find } = buildControls(async () => {
+      throw new Error('mower unreachable');
+    });
+    mower.update(state()); // docked: Mow reads off
+    await assert.rejects(find(fakeHap.Service.Switch, 'mow')!.triggerSet('On', true), (e) => e instanceof FakeHapStatusError);
+    assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), false);
+  });
+
+  test('switch state mirrors the mower: an app-started job turns Mow on, a pause turns Pause on', () => {
+    const { mower, find } = buildControls(async () => {});
+    mower.update(state({ docked: false, mowing: true }));
+    assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), true);
+    mower.update(state({ docked: false, paused: true }));
+    assert.equal(find(fakeHap.Service.Switch, 'mow')?.value('On'), false);
+    assert.equal(find(fakeHap.Service.Switch, 'pause')?.value('On'), true);
   });
 });
 
