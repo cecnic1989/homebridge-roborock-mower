@@ -34,7 +34,10 @@ const LEAVING_STATES = new Set([51, 52, 53, 54]);
 const MOWING_STATES = new Set([55, 56, 57, 64, 65, 66, 70]);
 const RETURNING_STATES = new Set([71, 72, 73, 74, 75]);
 // Bare idle (0) is deliberately not here: the mower reports 0 off the dock between a task ending and 143 being set.
-const DOCKED_STATES = new Set([61, 62, 63, 68, 76, 77, 104, 105, 106, 151, 152, 153]);
+const DOCKED_STATES = new Set([68, 76, 77, 104, 105, 106, 151, 152, 153]);
+// Rain/DND/low-battery waits (61-63): reported as soon as the mower decides to head home, before it is
+// physically back on the dock — only charge contact proves it arrived. Off the dock they mean "returning".
+const DOCK_WAIT_STATES = new Set([61, 62, 63]);
 const CHARGING_STATES = new Set([76, 151]);
 const PAUSED_STATES = new Set([17, 58, 67, 75, 107]);
 const FAULT_STATES = new Set([3, 15, 16, 59, 60, 69, 73, 74, 108, 109, 154]);
@@ -80,7 +83,7 @@ export function deriveMowerState(dps: Dps): DerivedState {
     docked,
     leaving: LEAVING_STATES.has(state),
     mowing: MOWING_STATES.has(state),
-    returning: !docked && (RETURNING_STATES.has(state) || offDock !== 0),
+    returning: !docked && (RETURNING_STATES.has(state) || DOCK_WAIT_STATES.has(state) || offDock !== 0),
     charging: chargeState === 1 || CHARGING_STATES.has(state),
     paused: PAUSED_STATES.has(state),
     fault,

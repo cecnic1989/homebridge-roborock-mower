@@ -61,6 +61,19 @@ describe('deriveMowerState edge cases', () => {
     assert.equal(deriveMowerState({ 123: 71, 127: 0, 143: 0 }).returning, true);
   });
 
+  // 2026-08-26 incident: a rain return reported 61 straight from mowing, while the mower was still
+  // outside a closed garage; treating it as docked closed the door in its face.
+  test('a rain/DND/low-battery wait state is docked only with dock contact; off the dock it is returning', () => {
+    for (const state of [61, 62, 63]) {
+      const stranded = deriveMowerState({ 121: 15, 123: state, 127: 0, 132: 1, 143: 0 });
+      assert.equal(stranded.docked, false, `state ${state} without charge contact is not docked`);
+      assert.equal(stranded.returning, true, `state ${state} without charge contact is returning`);
+      const docked = deriveMowerState({ 121: 15, 123: state, 127: 1, 143: 0 });
+      assert.equal(docked.docked, true, `state ${state} with charge contact is docked`);
+      assert.equal(docked.returning, false, `state ${state} with charge contact is not returning`);
+    }
+  });
+
   test('fault from error code or a fault state, and paused from a pause state', () => {
     assert.equal(deriveMowerState({ 120: 7, 123: 55 }).fault, true);
     assert.equal(deriveMowerState({ 120: 0, 123: 60 }).fault, true);

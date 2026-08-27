@@ -190,7 +190,28 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       this.retryTimer = setTimeout(() => void this.reconcile(), STARTUP_RETRY_MS);
       this.retryTimer.unref?.();
     }
-    this.reconcileTimer = setInterval(() => void this.reconcile(), this.pollSeconds() * 1000);
+    this.scheduleReconcile();
+  }
+
+  // A faulted mower that has also gone push-silent (2026-08-26: stuck outside in the rain, MQTT dead for
+  // 9 h) only heals via the cloud, so re-sync at the rate-limit floor instead of the configured interval.
+  nextReconcileSeconds(): number {
+    const attentionStale = [...this.mowers.values()].some((tracked) => {
+      const pushAge = tracked.lastPushAt === undefined ? Infinity : this.now() - tracked.lastPushAt;
+      return tracked.last?.attention === true && pushAge > STALE_PUSH_MS;
+    });
+    return attentionStale ? Math.min(this.pollSeconds(), MIN_POLL_SECONDS) : this.pollSeconds();
+  }
+
+  private scheduleReconcile(): void {
+    if (this.stopped) {
+      return;
+    }
+    clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = setTimeout(
+      () => void this.reconcile().finally(() => this.scheduleReconcile()),
+      this.nextReconcileSeconds() * 1000,
+    );
     this.reconcileTimer.unref?.();
   }
 
@@ -222,7 +243,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
   private stop(): void {
     this.stopped = true;
     this.mqtt?.stop();
-    clearInterval(this.reconcileTimer);
+    clearTimeout(this.reconcileTimer);
     clearTimeout(this.retryTimer);
     for (const tracked of this.mowers.values()) {
       tracked.accessory.dispose();

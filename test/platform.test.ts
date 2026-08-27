@@ -289,6 +289,26 @@ describe('RoborockMowerPlatform re-sync', () => {
     assert.equal(clients.length, 2, 'MQTT connection replaced');
   });
 
+  test('while a mower needs attention and pushes have gone quiet, the next re-sync comes at the 15-min floor', async () => {
+    const faulted = {
+      success: true,
+      result: { ...home, devices: [{ ...home.devices[0], deviceStatus: { ...home.devices[0].deviceStatus, 123: 59 } }] },
+    };
+    let response: object = { success: true, result: home };
+    const { platform, client, resync } = start({ session, homeResponse: () => response });
+    await platform.whenStarted();
+    connect(client);
+    assert.equal(platform.nextReconcileSeconds(), 3600);
+    push(client, '{"123":59,"127":0}'); // recoverable fault, as pushed in the 2026-08-26 incident...
+    assert.equal(platform.nextReconcileSeconds(), 3600, 'a fresh push means MQTT can still deliver the recovery');
+    response = faulted;
+    await resync(); // ...then an hour of push silence; the cloud agrees it is still faulted
+    assert.equal(platform.nextReconcileSeconds(), 900);
+    response = { success: true, result: home };
+    await resync(); // the mower was rescued: cloud says docked and healthy again
+    assert.equal(platform.nextReconcileSeconds(), 3600);
+  });
+
   test('a rename in the Roborock app propagates to the accessory', async () => {
     let response: object = { success: true, result: home };
     const { platform, accessories, resync } = start({ session, homeResponse: () => response });
