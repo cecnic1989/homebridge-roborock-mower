@@ -29,9 +29,10 @@ class FakeClient extends EventEmitter {
   unsubscribe() {
     return this;
   }
+  failPublish = false;
   publish(topic: string, payload: Buffer, _opts: unknown, cb?: (err?: Error) => void) {
     this.published.push({ topic, payload });
-    cb?.();
+    cb?.(this.failPublish ? new Error('stream write failed') : undefined);
     return this;
   }
   end() {
@@ -214,6 +215,99 @@ describe('RoborockMqtt RPC', () => {
     await drain(); // the request is now on the wire, waiting for a reply
     mqtt.restart();
     await assert.rejects(pending, /connection closed/i);
+  });
+});
+
+describe('RoborockMqtt liveness probe', () => {
+  test('a probe skips while a command is queued, and the queued command survives un-superseded', async () => {
+    const { client, mqtt } = liveMqtt();
+    const first = mqtt.request('duid-1', 'remote_pb', { app_button: 'MOW_GLOBAL' });
+    const queued = mqtt.request('duid-1', 'remote_pb', { app_button: 'CHARGE' });
+    const outcome = await mqtt.probe('duid-1', 'liveness_noop', []);
+    assert.equal(outcome, 'skipped', 'the probe must not enter the one-slot queue');
+    await drain();
+    reply(client, { id: decodeRequest(client).rpc.id, result: ['ok'] });
+    await first;
+    await drain();
+    assert.equal(decodeRequest(client, 1).rpc.params.app_button, 'CHARGE', 'the queued dock still went out');
+    reply(client, { id: decodeRequest(client, 1).rpc.id, result: ['ok'] });
+    await queued;
+  });
+
+  test('an error reply settles the probe as alive: a delivered frame proves the subscription', async () => {
+    const { client, mqtt } = liveMqtt();
+    const outcome = mqtt.probe('duid-1', 'liveness_noop', []);
+    await drain();
+    reply(client, { id: decodeRequest(client).rpc.id, error: { code: -1, message: 'unknown' } });
+    assert.equal(await outcome, 'alive');
+  });
+
+  test('a probe timeout resolves dead without rejecting', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { mqtt } = liveMqtt();
+      const outcome = mqtt.probe('duid-1', 'liveness_noop', []);
+      await drain();
+      mock.timers.tick(10_000);
+      assert.equal(await outcome, 'dead');
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('a user command issued while a probe is in flight publishes immediately', async () => {
+    const { client, mqtt } = liveMqtt();
+    const outcome = mqtt.probe('duid-1', 'liveness_noop', []);
+    await drain();
+    const command = mqtt.request('duid-1', 'remote_pb', { app_button: 'MOW_PAUSE' });
+    await drain();
+    assert.equal(client.published.length, 2, 'the probe must not hold the command slot');
+    reply(client, { id: decodeRequest(client, 1).rpc.id, result: ['ok'] });
+    await command;
+    reply(client, { id: decodeRequest(client).rpc.id, result: 'unknown_method' });
+    assert.equal(await outcome, 'alive');
+  });
+
+  test('a restart mid-probe resolves skipped, not dead: no strike from our own teardown', async () => {
+    const { mqtt } = liveMqtt();
+    const outcome = mqtt.probe('duid-1', 'liveness_noop', []);
+    await drain();
+    mqtt.restart();
+    assert.equal(await outcome, 'skipped');
+  });
+
+  test('a command overlapping a probe never reuses its RPC id, so neither reply can settle the wrong request', async () => {
+    mock.method(Math, 'random', () => 0.5); // every draw collides unless the id is re-rolled
+    try {
+      const { client, mqtt } = liveMqtt();
+      const probe = mqtt.probe('duid-1', 'liveness_noop', []);
+      await drain();
+      const command = mqtt.request('duid-1', 'remote_pb', { app_button: 'MOW_GLOBAL' });
+      await drain();
+      const probeId = decodeRequest(client, 0).rpc.id;
+      const commandId = decodeRequest(client, 1).rpc.id;
+      assert.notEqual(probeId, commandId, 'two pending requests for one mower must not share an id');
+      reply(client, { id: probeId, result: 'unknown_method' });
+      reply(client, { id: commandId, result: ['ok'] });
+      assert.equal(await probe, 'alive');
+      assert.deepEqual(await command, ['ok'], 'the probe reply must not have settled the user command');
+    } finally {
+      mock.restoreAll();
+    }
+  });
+
+  test('a local publish failure resolves skipped, not dead: it never tested the subscription', async () => {
+    const { client, mqtt } = liveMqtt();
+    client.failPublish = true;
+    assert.equal(await mqtt.probe('duid-1', 'liveness_noop', []), 'skipped');
+  });
+
+  test('onFrame fires for any decodable frame of a subscribed mower, including a foreign reply', () => {
+    const { client, mqtt } = liveMqtt();
+    const seen: string[] = [];
+    mqtt.onFrame((duid) => seen.push(duid));
+    reply(client, { id: 31999, result: ['ok'] }); // another client's reply on the shared account topic
+    assert.deepEqual(seen, ['duid-1']);
   });
 });
 

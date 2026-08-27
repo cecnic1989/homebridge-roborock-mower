@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
-import { describe, test } from 'node:test';
+import { describe, mock, test } from 'node:test';
 
 import type { PlatformAccessory } from 'homebridge';
 
@@ -80,7 +80,7 @@ function start(options: StartOptions = {}) {
     clock.now += advanceMs;
     await platform.reconcile();
   };
-  return { platform, accessories, calls, client, storagePath, resync, stored };
+  return { platform, accessories, calls, client, storagePath, resync, stored, clock };
 }
 
 const connect = (client: FakeMqttClient) => {
@@ -416,6 +416,278 @@ describe('RoborockMowerPlatform controls', () => {
     // broker never connected
     await assert.rejects(accessories[0].find(fakeHap.Service.Switch, 'mow')!.triggerSet('On', true));
     assert.equal(client.published.length, 0);
+  });
+});
+
+describe('RoborockMowerPlatform active liveness probe', () => {
+  const MIN15 = 16 * 60_000; // past the 15-min probe silence gate
+
+  const multiClient = () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    return { clients, connectMqtt };
+  };
+
+  const answerLastProbe = (client: FakeMqttClient) => {
+    const { payload } = client.published[client.published.length - 1];
+    const [frame] = decodeFrames(payload, 'localkey');
+    const envelope = JSON.parse(frame.payload.toString('utf8')) as { dps: Record<string, string> };
+    const rpc = JSON.parse(envelope.dps['101']) as { id: number };
+    const ts = 1787457040;
+    client.emit('message', TOPIC, buildV1Frame(102, ts,
+      JSON.stringify({ t: ts, dps: { 102: JSON.stringify({ id: rpc.id, result: 'unknown_method' }) } }), 'localkey'));
+  };
+
+  // Drives one liveness tick where the probe goes unanswered: the 10s request timeout is mock-ticked.
+  const deadTick = async (platform: RoborockMowerPlatform) => {
+    const tick = platform.livenessTick();
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve();
+    }
+    mock.timers.tick(10_000);
+    await tick;
+  };
+
+  test('two unanswered probes on a live connection restart MQTT in ~30 min, hours before the passive check', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { clients, connectMqtt } = multiClient();
+      const { platform, clock } = start({ session, connectMqtt: connectMqtt as never });
+      await platform.whenStarted();
+      connect(clients[0]);
+      push(clients[0], '{"123":0,"121":100}');
+      clock.now += MIN15;
+      await deadTick(platform);
+      assert.equal(clients.length, 1, 'one lost QoS-0 reply is not a dead subscription');
+      clock.now += MIN15;
+      await deadTick(platform);
+      assert.equal(clients.length, 2, 'two consecutive silent probes restart the connection');
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('a probe answer re-bases liveness without faking push freshness: a stale push still yields to the cloud', async () => {
+    const { platform, accessories, client, clock, resync } = start({ session });
+    await platform.whenStarted();
+    connect(client);
+    push(client, '{"123":55,"127":0}'); // mowing...
+    clock.now += 2 * 3_600_000; // ...then two silent hours
+    const tick = platform.livenessTick();
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve();
+    }
+    answerLastProbe(client);
+    await tick;
+    await resync(60_000); // cloud says idle/charge-complete and the push is hours old
+    assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'mowing')?.value('ContactSensorState'), 0,
+      'the probe reply must not make the stale mowing push outrank the snapshot');
+  });
+
+  test('a mower that never answers probes gets exactly one probe restart, then the passive check still covers it', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { clients, connectMqtt } = multiClient();
+      const { platform, clock } = start({ session, connectMqtt: connectMqtt as never });
+      await platform.whenStarted();
+      connect(clients[0]);
+      push(clients[0], '{"123":0,"121":100}');
+      for (let i = 0; i < 2; i++) {
+        clock.now += MIN15;
+        await deadTick(platform);
+      }
+      assert.equal(clients.length, 2, 'first restart');
+      connect(clients[1]);
+      for (let i = 0; i < 4; i++) {
+        clock.now += MIN15;
+        await deadTick(platform);
+      }
+      assert.equal(clients.length, 2, 'still failing after the restart means asleep, not dead: no storm');
+      const before = clients[1].published.length;
+      clock.now += MIN15;
+      await platform.livenessTick();
+      assert.equal(clients[1].published.length, before, 'dormant: no more probes');
+      clock.now += 2 * 3_600_000 + 60_000;
+      await platform.livenessTick();
+      assert.equal(clients.length, 3, 'the passive 2h check is never disabled');
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('a push re-arms a dormant probe so one bad night does not disable fast detection forever', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { clients, connectMqtt } = multiClient();
+      const { platform, clock } = start({ session, connectMqtt: connectMqtt as never });
+      await platform.whenStarted();
+      connect(clients[0]);
+      push(clients[0], '{"123":0,"121":100}');
+      for (let i = 0; i < 2; i++) {
+        clock.now += MIN15;
+        await deadTick(platform);
+      }
+      connect(clients[1]);
+      for (let i = 0; i < 4; i++) {
+        clock.now += MIN15;
+        await deadTick(platform);
+      }
+      push(clients[1], '{"123":51,"127":0}'); // the mower woke up
+      const before = clients[1].published.length;
+      clock.now += MIN15;
+      const tick = platform.livenessTick();
+      for (let i = 0; i < 4; i++) {
+        await Promise.resolve();
+      }
+      assert.equal(clients[1].published.length, before + 1, 'probing resumed after real traffic');
+      answerLastProbe(clients[1]); // settle the in-flight probe so the tick resolves
+      await tick;
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('no probes while pushes are flowing: liveness is already proven', async () => {
+    const { platform, client, clock } = start({ session });
+    await platform.whenStarted();
+    connect(client);
+    push(client, '{"123":55,"127":0}');
+    const before = client.published.length;
+    clock.now += 5 * 60_000;
+    await platform.livenessTick();
+    assert.equal(client.published.length, before, 'a chatty mower must not be woken by probes');
+  });
+
+  test('a real push arriving mid-probe outweighs the probe reply being lost: no strike from a proven-alive link', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { clients, connectMqtt } = multiClient();
+      const { platform, clock } = start({ session, connectMqtt: connectMqtt as never });
+      await platform.whenStarted();
+      connect(clients[0]);
+      push(clients[0], '{"123":0,"121":100}');
+      clock.now += MIN15;
+      const tick = platform.livenessTick();
+      for (let j = 0; j < 4; j++) {
+        await Promise.resolve();
+      }
+      push(clients[0], '{"121":99}'); // a real frame lands while the probe is in flight...
+      clock.now += 1_000;
+      mock.timers.tick(10_000); // ...and the probe's own reply is lost: this must NOT count a strike
+      await tick;
+      clock.now += MIN15;
+      await deadTick(platform); // one genuinely lost reply in the next silent stretch
+      assert.equal(clients.length, 1, 'a stale strike plus one QoS-0 loss must not restart a proven-alive link');
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('a mower that never delivered any frame still gets the passive fallback after going dormant', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { clients, connectMqtt } = multiClient();
+      const { platform, clock } = start({ session, connectMqtt: connectMqtt as never });
+      await platform.whenStarted();
+      connect(clients[0]); // asleep since boot: no push, no probe answers
+      for (let i = 0; i < 2; i++) {
+        clock.now += MIN15;
+        await deadTick(platform);
+      }
+      assert.equal(clients.length, 2, 'probe restart');
+      connect(clients[1]);
+      for (let i = 0; i < 2; i++) {
+        clock.now += MIN15;
+        await deadTick(platform);
+      }
+      assert.equal(clients.length, 2, 'dormant after the restart did not help');
+      clock.now += 2 * 3_600_000 + 60_000;
+      await platform.livenessTick();
+      assert.equal(clients.length, 3, 'the promised 2-hour passive fallback must cover a never-alive mower too');
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('a user command in flight defers the probe restart: a background health check must not fail a HomeKit action', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { clients, connectMqtt } = multiClient();
+      const { platform, accessories, clock } = start({ session, connectMqtt: connectMqtt as never, config: { exposeControls: true } });
+      await platform.whenStarted();
+      connect(clients[0]);
+      push(clients[0], '{"123":0,"121":100}');
+      clock.now += MIN15;
+      await deadTick(platform); // strike one
+      clock.now += MIN15;
+      const tick = platform.livenessTick();
+      for (let j = 0; j < 4; j++) {
+        await Promise.resolve();
+      }
+      mock.timers.tick(5_000);
+      const setPromise = accessories[0].find(fakeHap.Service.Switch, 'mow')!.triggerSet('On', true); // user taps Mow mid-probe
+      setPromise.catch(() => undefined);
+      for (let j = 0; j < 4; j++) {
+        await Promise.resolve();
+      }
+      mock.timers.tick(5_000); // the probe times out (strike two) while the command is still on the wire
+      await tick;
+      assert.equal(clients.length, 1, 'restart deferred while a user command is in flight');
+      mock.timers.tick(10_000); // let the command settle so nothing leaks into other tests
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test('the passive restart also waits for an in-flight command: no HomeKit action dies for a health check', async () => {
+    const { clients, connectMqtt } = multiClient();
+    const { platform, accessories, clock } = start({ session, connectMqtt: connectMqtt as never, config: { exposeControls: true, mqttLivenessProbe: false } });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":0,"121":100}');
+    clock.now += 2 * 3_600_000 + 60_000; // two silent hours: the passive check is due
+    const setPromise = accessories[0].find(fakeHap.Service.Switch, 'mow')!.triggerSet('On', true);
+    setPromise.catch(() => undefined);
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve();
+    }
+    await platform.livenessTick();
+    assert.equal(clients.length, 1, 'restarting here would reject the command the user just issued');
+  });
+
+  test('with the probe disabled, a subscription dead from first connect still gets the 2-hour passive restart', async () => {
+    const { clients, connectMqtt } = multiClient();
+    const { platform, clock } = start({ session, connectMqtt: connectMqtt as never, config: { mqttLivenessProbe: false } });
+    await platform.whenStarted();
+    connect(clients[0]); // and then not a single frame ever arrives
+    clock.now += 2 * 3_600_000 + 60_000;
+    await platform.livenessTick();
+    assert.equal(clients.length, 2, 'the passive net must cover a mower that was never seen alive');
+  });
+
+  test('a broker disconnect between two unanswered probes resets the strike count', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { clients, connectMqtt } = multiClient();
+      const { platform, clock } = start({ session, connectMqtt: connectMqtt as never });
+      await platform.whenStarted();
+      connect(clients[0]);
+      push(clients[0], '{"123":0,"121":100}');
+      clock.now += MIN15;
+      await deadTick(platform);
+      clients[0].connected = false;
+      clients[0].emit('close'); // an ordinary outage...
+      connect(clients[0]);
+      clock.now += MIN15;
+      await deadTick(platform);
+      assert.equal(clients.length, 1, 'an outage plus one lost reply must not add up to a restart');
+    } finally {
+      mock.timers.reset();
+    }
   });
 });
 

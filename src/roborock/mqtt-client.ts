@@ -18,6 +18,18 @@ export interface MqttLogger {
 
 export type DpsListener = (dps: Record<number, unknown>) => void;
 
+// The mower answered, but with an error body. For a liveness probe this still proves the subscription:
+// the frame travelled the same broker path as state pushes.
+export class RpcErrorReply extends Error {}
+
+// The request was torn down by our own stop/restart/unsubscribe — says nothing about the subscription.
+class RequestAborted extends Error {}
+
+// The request went out and nothing came back — the only failure that actually indicts the subscription.
+class RequestTimeout extends Error {}
+
+export type ProbeOutcome = 'alive' | 'skipped' | 'dead';
+
 // Same derivation as the Roborock app (and python-roborock / ioBroker).
 export function mqttCredentials(rriot: Pick<RRiot, 'u' | 's' | 'k'> & { r: Pick<RRiot['r'], 'm'> }): MqttCredentials {
   if (!rriot.r.m) {
@@ -59,6 +71,7 @@ export class RoborockMqtt {
   private client?: MqttClient;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly connectionListeners: ((connected: boolean) => void)[] = [];
+  private readonly frameListeners: ((duid: string) => void)[] = [];
   private lastConnected = false;
   private resubscribeTimer?: NodeJS.Timeout;
   private lastRefusalRestart = 0;
@@ -185,6 +198,31 @@ export class RoborockMqtt {
     });
   }
 
+  // End-to-end subscription check. Never rejects, never enters the command queue: a queued probe could
+  // evict a waiting user command through the one-slot "superseded" path, and a busy queue means a command
+  // reply is about to prove liveness anyway.
+  async probe(duid: string, method: string, params: unknown): Promise<ProbeOutcome> {
+    if (!this.client?.connected || !this.subscriptions.has(duid) || this.commandQueues.has(duid)) {
+      return 'skipped';
+    }
+    try {
+      await this.requestNow(duid, method, params, REQUEST_TIMEOUT_MS);
+      return 'alive';
+    } catch (error) {
+      if (error instanceof RpcErrorReply) {
+        return 'alive';
+      }
+      // Only a timeout indicts the subscription; a local publish error or our own teardown never tested it.
+      return error instanceof RequestTimeout ? 'dead' : 'skipped';
+    }
+  }
+
+  // Whether a user command is in flight or queued for any mower. A restart rejects every pending command
+  // account-wide, so restart decisions must consider them all, not just the mower being checked.
+  busy(): boolean {
+    return this.commandQueues.size > 0;
+  }
+
   private onCommandSettled(duid: string, queue: CommandQueue): void {
     if (this.commandQueues.get(duid) !== queue) {
       return; // the queue was torn down (stop/restart/unsubscribe) while this command was settling
@@ -207,7 +245,12 @@ export class RoborockMqtt {
     if (!subscription) {
       return Promise.reject(new Error(`No MQTT subscription for ${duid}.`));
     }
-    const id = 10_000 + Math.floor(Math.random() * 22_767);
+    // A probe can be pending alongside a user command (it bypasses the queue), so re-roll a colliding id:
+    // a shared id would let one reply settle the other's request.
+    let id = 10_000 + Math.floor(Math.random() * 22_767);
+    while (this.pendingRequests.has(`${duid}:${id}`)) {
+      id = 10_000 + ((id - 10_000 + 1) % 22_767);
+    }
     const timestamp = Math.floor(Date.now() / 1000);
     const resolvedParams = typeof params === 'function' ? (params as () => unknown)() : params;
     const payload = JSON.stringify({ dps: { '101': JSON.stringify({ id, method, params: resolvedParams }) }, t: timestamp });
@@ -219,7 +262,7 @@ export class RoborockMqtt {
       const key = `${duid}:${id}`;
       const timer = setTimeout(() => {
         this.pendingRequests.delete(key);
-        reject(new Error(`Roborock ${method} timed out after ${timeoutMs / 1000}s.`));
+        reject(new RequestTimeout(`Roborock ${method} timed out after ${timeoutMs / 1000}s.`));
       }, timeoutMs);
       timer.unref?.();
       this.pendingRequests.set(key, { resolve, reject, timer });
@@ -242,7 +285,7 @@ export class RoborockMqtt {
     this.pendingRequests.delete(key);
     clearTimeout(pending.timer);
     if (reply.error !== undefined) {
-      pending.reject(new Error(`Roborock rejected the command: ${JSON.stringify(reply.error)}`));
+      pending.reject(new RpcErrorReply(`Roborock rejected the command: ${JSON.stringify(reply.error)}`));
     } else {
       pending.resolve(reply.result);
     }
@@ -255,7 +298,7 @@ export class RoborockMqtt {
       }
       this.pendingRequests.delete(key);
       clearTimeout(pending.timer);
-      pending.reject(new Error(reason));
+      pending.reject(new RequestAborted(reason));
     }
     for (const [queueDuid, queue] of this.commandQueues) {
       if (duid !== undefined && queueDuid !== duid) {
@@ -268,6 +311,12 @@ export class RoborockMqtt {
 
   onConnectionChange(listener: (connected: boolean) => void): void {
     this.connectionListeners.push(listener);
+  }
+
+  // Fires once per message that carried at least one decodable frame for a subscribed mower — pushes, our
+  // replies, and other clients' replies all count as proof the subscription delivers.
+  onFrame(listener: (duid: string) => void): void {
+    this.frameListeners.push(listener);
   }
 
   private topicFor(duid: string): string {
@@ -300,7 +349,13 @@ export class RoborockMqtt {
     if (!subscription) {
       return;
     }
-    for (const frame of decodeFrames(payload, subscription.localKey)) {
+    const frames = decodeFrames(payload, subscription.localKey);
+    if (frames.length > 0) {
+      for (const listener of this.frameListeners) {
+        listener(duid);
+      }
+    }
+    for (const frame of frames) {
       if (frame.protocol !== PROTOCOL_DPS_PUSH) {
         this.log.debug(`MQTT ${duid}: protocol ${frame.protocol}, ${frame.payload.length} bytes`);
         continue;

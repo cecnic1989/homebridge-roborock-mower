@@ -16,6 +16,12 @@
         "maximum": 86400,
         "description": "Live state arrives by push; this only re-syncs with the Roborock cloud as a safety net. Roborock limits this call, keep it at an hour or more."
       },
+      "mqttLivenessProbe": {
+        "title": "Active connection check",
+        "type": "boolean",
+        "default": true,
+        "description": "After 15 minutes of silence, ask the mower a harmless question over the live connection; if it stops answering, reconnect. Detects lost live updates in about 30 minutes instead of 2 hours."
+      },
       "exposeDocked": {
         "title": "Docked sensor",
         "type": "boolean",
@@ -97,7 +103,8 @@
       "expandable": true,
       "expanded": false,
       "items": [
-        "pollInterval"
+        "pollInterval",
+        "mqttLivenessProbe"
       ]
     }
   ]

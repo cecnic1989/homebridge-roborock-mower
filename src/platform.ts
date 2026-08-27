@@ -2,7 +2,7 @@ import type { API, Characteristic, DynamicPlatformPlugin, Logging, PlatformAcces
 import type mqtt from 'mqtt';
 
 import { MowerAccessory, type SensorOptions } from './mower/accessory.js';
-import { ACTION_LABELS, isOk, type MowerAction, remotePbParams } from './mower/commands.js';
+import { ACTION_LABELS, isOk, LIVENESS_PROBE, type MowerAction, remotePbParams } from './mower/commands.js';
 import { type DerivedState, type Dps, deriveMowerState, describeAttention, describeMowState } from './mower/state.js';
 import { findMowers, type MowerDevice } from './roborock/mower.js';
 import { RoborockMqtt } from './roborock/mqtt-client.js';
@@ -22,6 +22,7 @@ export interface RoborockMowerConfig extends PlatformConfig {
   faultIndicator?: boolean;
   exposeControls?: boolean;
   sensorDebounceSeconds?: number;
+  mqttLivenessProbe?: boolean;
 }
 
 // Seams for tests; Homebridge itself never passes these.
@@ -55,7 +56,12 @@ interface TrackedMower {
   accessory: MowerAccessory;
   dps: Dps;
   last?: DerivedState;
-  lastPushAt?: number;
+  lastPushAt?: number; // last real state push — drives push-vs-snapshot freshness only
+  lastAliveAt?: number; // last proof the subscription delivers: any frame, or a probe answer
+  lastProbeAt?: number;
+  probeFailures: number;
+  probeRestarted: boolean;
+  probeDormant: boolean;
 }
 
 const MIN_POLL_SECONDS = 900; // Roborock rate-limits home data; python-roborock budgets 5/hour.
@@ -67,6 +73,11 @@ const STALE_PUSH_MS = 5 * 60_000; // a push this old no longer outranks a disagr
 // live is the signature of a silently dropped subscription — the broker drops it without disconnecting.
 const SILENT_PUSH_RESTART_MS = 2 * 3_600_000;
 const MQTT_LIVENESS_INTERVAL_MS = 15 * 60_000; // needs no cloud call, so it runs between re-syncs too
+// Two consecutive unanswered probes (~30 min) before acting: one QoS-0 loss must not restart a healthy
+// connection. Storm math: probes only fire after 15 min of silence, a restart needs two timeouts on a
+// connected broker, at most one probe restart per mower per dormancy cycle, and re-arming requires a real
+// frame — so a healthy connection with an answering mower sees zero extra restarts.
+const PROBE_FAILURE_LIMIT = 2;
 const SESSION_EXPIRED = 'session-expired';
 
 function message(error: unknown): string {
@@ -80,6 +91,14 @@ function numberOption(value: unknown, fallback: number, min: number, max: number
     return fallback;
   }
   return Math.min(max, Math.max(min, n));
+}
+
+// Likewise for switches: a hand-edited "false" or 0 must count as off, not as "any truthy string".
+function booleanOption(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  return !(value === false || value === 'false' || value === 0);
 }
 
 function toCached(device: MowerDevice): CachedDevice {
@@ -154,25 +173,93 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     this.checkMqttLiveness();
   }
 
+  // Runs every 15 min: the active probe first, then the passive fallback. Timer callbacks must never reject.
+  async livenessTick(): Promise<void> {
+    try {
+      await this.probeLiveness();
+    } catch (error) {
+      this.log.debug(`Liveness probe failed unexpectedly: ${message(error)}`);
+    }
+    this.checkMqttLiveness();
+  }
+
+  // Active end-to-end check: ask the mower a question it is guaranteed to answer ("unknown_method") and
+  // expect the reply over the push subscription. Two consecutive timeouts on a live connection mean the
+  // subscription is dead — restart once. Still silent after the restart means the mower is asleep, not the
+  // subscription: go dormant (passive check continues) until a real frame re-arms probing.
+  private async probeLiveness(): Promise<void> {
+    const mqtt = this.mqtt;
+    if (!mqtt || !booleanOption(this.pluginConfig.mqttLivenessProbe, true)) {
+      return;
+    }
+    for (const tracked of [...this.mowers.values()]) {
+      const now = this.now();
+      if (tracked.probeDormant || !mqtt.connected
+        || (tracked.lastAliveAt !== undefined && now - tracked.lastAliveAt < MQTT_LIVENESS_INTERVAL_MS)
+        || (tracked.lastProbeAt !== undefined && now - tracked.lastProbeAt < MQTT_LIVENESS_INTERVAL_MS - 60_000)) {
+        continue;
+      }
+      tracked.lastProbeAt = now;
+      const outcome = await mqtt.probe(tracked.device.duid, LIVENESS_PROBE.method, LIVENESS_PROBE.params);
+      this.log.debug(`${tracked.device.name}: liveness probe ${outcome}`);
+      if (outcome === 'alive') {
+        tracked.lastAliveAt = this.now();
+        tracked.probeFailures = 0;
+        tracked.probeRestarted = false;
+      } else if (outcome === 'skipped') {
+        tracked.lastProbeAt = undefined; // no evidence was gathered; the next tick may try again
+      } else if (outcome === 'dead' && mqtt.connected) {
+        if (tracked.lastAliveAt !== undefined && tracked.lastAliveAt >= now) {
+          continue; // a real frame arrived while the probe was in flight: the link is proven, only the reply was lost
+        }
+        if (mqtt.busy()) {
+          continue; // a command is on the wire (any mower — a restart would reject it); defer the verdict
+        }
+        tracked.probeFailures += 1;
+        if (tracked.probeFailures >= PROBE_FAILURE_LIMIT) {
+          tracked.probeFailures = 0;
+          // If another mower's frames prove the connection alive, this mower's silence is device-side.
+          const provenAliveElsewhere = [...this.mowers.values()].some((other) => other !== tracked
+            && other.lastAliveAt !== undefined && this.now() - other.lastAliveAt < MQTT_LIVENESS_INTERVAL_MS);
+          if (!tracked.probeRestarted && !provenAliveElsewhere) {
+            tracked.probeRestarted = true;
+            this.log.warn(`${tracked.device.name}: not answering liveness probes on a live connection; reconnecting MQTT.`);
+            this.restartMqtt();
+          } else {
+            tracked.probeDormant = true;
+            this.log.info(`${tracked.device.name}: not answering probes${tracked.probeRestarted ? ' after a reconnect' : ''} `
+              + '(likely asleep); falling back to the 2-hour passive check.');
+          }
+        }
+      }
+    }
+  }
+
   // Agreement with the cloud is no proof of life: the broker can drop a subscription without disconnecting
   // (2026-08-26: docked-idle agreed all night, and the 6 AM undock push was lost, trapping the mower behind
   // a garage automation that never fired). The clock re-bases on each restart, so through a long quiet
   // stretch the connection is refreshed every SILENT_PUSH_RESTART_MS and never grows old.
   private checkMqttLiveness(): void {
-    if (!(this.mqtt?.connected ?? false)) {
-      return;
+    const mqtt = this.mqtt;
+    if (!mqtt?.connected || mqtt.busy()) {
+      return; // a restart rejects every pending command; let the user's action settle and re-check next tick
     }
     const silent = [...this.mowers.values()].find(
-      (tracked) => tracked.lastPushAt !== undefined && this.now() - tracked.lastPushAt > SILENT_PUSH_RESTART_MS,
+      (tracked) => tracked.lastAliveAt !== undefined && this.now() - tracked.lastAliveAt > SILENT_PUSH_RESTART_MS,
     );
     if (!silent) {
       return;
     }
-    this.log.warn(`${silent.device.name}: no live update for ${Math.round((this.now() - silent.lastPushAt!) / 60_000)} min `
+    this.log.warn(`${silent.device.name}: no live traffic for ${Math.round((this.now() - silent.lastAliveAt!) / 60_000)} min `
       + 'on a live connection; reconnecting MQTT as a precaution.');
+    this.restartMqtt();
+  }
+
+  // Restarting without re-basing the silence clocks would immediately re-trip the passive check and loop.
+  private restartMqtt(): void {
     for (const tracked of this.mowers.values()) {
-      if (tracked.lastPushAt !== undefined) {
-        tracked.lastPushAt = this.now();
+      if (tracked.lastAliveAt !== undefined) {
+        tracked.lastAliveAt = this.now();
       }
     }
     this.mqtt?.restart();
@@ -221,7 +308,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       this.retryTimer.unref?.();
     }
     this.scheduleReconcile();
-    this.livenessTimer = setInterval(() => this.checkMqttLiveness(), MQTT_LIVENESS_INTERVAL_MS);
+    this.livenessTimer = setInterval(() => void this.livenessTick(), MQTT_LIVENESS_INTERVAL_MS);
     this.livenessTimer.unref?.();
   }
 
@@ -289,9 +376,26 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       this.mqtt.onConnectionChange((connected) => {
         for (const tracked of this.mowers.values()) {
           tracked.accessory.setOnline(connected && tracked.online);
+          if (!connected) {
+            tracked.probeFailures = 0; // an ordinary outage plus one lost reply must not add up to a restart
+          } else {
+            // A fresh connection deserves a fresh 2h clock — this also covers restarts the client performs
+            // on its own (refused suback) and seeds mowers that have never delivered a frame.
+            tracked.lastAliveAt = this.now();
+          }
         }
         if (!connected) {
           this.log.warn('Roborock MQTT disconnected; sensors marked inactive until it reconnects.');
+        }
+      });
+      // Any decodable frame — a push, our reply, another client's reply — proves the subscription delivers.
+      this.mqtt.onFrame((duid) => {
+        const tracked = this.mowers.get(duid);
+        if (tracked) {
+          tracked.lastAliveAt = this.now();
+          tracked.probeFailures = 0;
+          tracked.probeRestarted = false;
+          tracked.probeDormant = false;
         }
       });
       this.restoreFromCache();
@@ -324,7 +428,10 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       (action) => this.command(device.duid, action), // by duid: tracked.device is replaced on every sync
     );
     accessory.setInformation({ model: device.model, serial: device.sn, firmware: device.fv });
-    const tracked: TrackedMower = { device, online: true, platformAccessory, accessory, dps: {} };
+    const tracked: TrackedMower = {
+      device, online: true, platformAccessory, accessory, dps: {},
+      probeFailures: 0, probeRestarted: false, probeDormant: false,
+    };
     this.mowers.set(device.duid, tracked);
     accessory.setOnline(this.live);
     this.subscribeMqtt(tracked);
@@ -439,12 +546,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       }
     }
     if (staleSubscription) {
-      for (const tracked of this.mowers.values()) {
-        if (tracked.lastPushAt !== undefined) {
-          tracked.lastPushAt = this.now(); // re-base the silence clock; the liveness check refreshes from here
-        }
-      }
-      this.mqtt?.restart();
+      this.restartMqtt(); // lastPushAt stays untouched: it tracks real pushes for freshness arbitration only
     }
   }
 

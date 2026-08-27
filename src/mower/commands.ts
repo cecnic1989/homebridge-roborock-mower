@@ -20,3 +20,8 @@ export function remotePbParams(action: MowerAction, nowMs: number): Record<strin
 export function isOk(reply: unknown): boolean {
   return reply === 'ok' || (Array.isArray(reply) && reply.includes('ok'));
 }
+
+// Liveness probe (verified live on the a282, 2026-08-26): the mower answers ANY unrecognized method with
+// {"result":"unknown_method"} in ~0.1s — a guaranteed, side-effect-free reply over the push subscription.
+// The name is deliberately meaningless so no future firmware verb can collide with it.
+export const LIVENESS_PROBE = { method: 'liveness_noop', params: [] as unknown[] };
