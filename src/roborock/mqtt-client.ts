@@ -20,7 +20,7 @@ export type DpsListener = (dps: Record<number, unknown>) => void;
 
 // The mower answered, but with an error body. For a liveness probe this still proves the subscription:
 // the frame travelled the same broker path as state pushes.
-export class RpcErrorReply extends Error {}
+class RpcErrorReply extends Error {}
 
 // The request was torn down by our own stop/restart/unsubscribe — says nothing about the subscription.
 class RequestAborted extends Error {}

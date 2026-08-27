@@ -669,6 +669,46 @@ describe('RoborockMowerPlatform active liveness probe', () => {
     assert.equal(clients.length, 2, 'the passive net must cover a mower that was never seen alive');
   });
 
+  test('a mower tracked after MQTT connected is still covered by the passive check (fresh-install ordering)', async () => {
+    const { clients, connectMqtt } = multiClient();
+    const autoConnect = () => {
+      const c = connectMqtt();
+      queueMicrotask(() => connect(c)); // the broker connects before the startup cloud sync tracks the mower
+      return c;
+    };
+    const { platform, clock } = start({ session, connectMqtt: autoConnect as never, config: { mqttLivenessProbe: false } });
+    await platform.whenStarted();
+    clock.now += 2 * 3_600_000 + 60_000; // and then not a single frame arrives
+    await platform.livenessTick();
+    assert.equal(clients.length, 2, 'a late-tracked mower must not be invisible to the 2-hour net');
+  });
+
+  test('the cloud-disagreement restart also waits for an in-flight command', async () => {
+    const { clients, connectMqtt } = multiClient();
+    const { platform, accessories, resync } = start({ session, connectMqtt: connectMqtt as never, config: { exposeControls: true } });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":55,"127":0}'); // mowing, then an hour of silence; the snapshot will disagree
+    const setPromise = accessories[0].find(fakeHap.Service.Switch, 'mow')!.triggerSet('On', true);
+    setPromise.catch(() => undefined);
+    for (let i = 0; i < 4; i++) {
+      await Promise.resolve();
+    }
+    await resync();
+    assert.equal(clients.length, 1, 'the re-sync restart must not reject the command the user just issued');
+  });
+
+  test('a hand-edited "0" disables the probe like the schema false does', async () => {
+    const { platform, client, clock } = start({ session, config: { mqttLivenessProbe: '0' } });
+    await platform.whenStarted();
+    connect(client);
+    push(client, '{"123":0,"121":100}');
+    const before = client.published.length;
+    clock.now += 16 * 60_000;
+    await platform.livenessTick();
+    assert.equal(client.published.length, before, 'the user said off; no liveness_noop may be sent');
+  });
+
   test('a broker disconnect between two unanswered probes resets the strike count', async () => {
     mock.timers.enable({ apis: ['setTimeout'] });
     try {

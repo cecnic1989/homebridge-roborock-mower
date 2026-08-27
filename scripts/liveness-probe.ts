@@ -52,8 +52,13 @@ const flag = (key: string) => {
 };
 const repeat = Number(flag('--repeat') ?? 1);
 const intervalMin = Number(flag('--interval') ?? 15);
+if (!Number.isFinite(repeat) || repeat < 1 || !Number.isFinite(intervalMin) || intervalMin <= 0) {
+  // A NaN interval would become setInterval(…, 1ms) and blast every probe at the mower within milliseconds.
+  console.error('--repeat and --interval must be positive numbers');
+  process.exit(2);
+}
 
-const known = name !== undefined && (name === 'ping' || name === 'custom' || name in CANDIDATES);
+const known = name !== undefined && (name === 'ping' || name === 'custom' || Object.hasOwn(CANDIDATES, name));
 if (!known || (name === 'custom' && !flag('--method'))) {
   console.error(`usage: liveness-probe <${[...Object.keys(CANDIDATES), 'ping', 'custom'].join('|')}> [--dry-run] [--repeat N] [--interval MIN]`);
   process.exit(2);
@@ -147,6 +152,7 @@ const rel = () => `+${((Date.now() - started) / 1000).toFixed(1)}s`;
 // reconnectPeriod 0: on any drop we exit instead of silently re-running the connect handler.
 const client = mqtt.connect(url, { clientId: `${username}-${randomAlphanumeric(6)}`, username, password, keepalive: 30, clean: true, reconnectPeriod: 0 });
 let sent = 0;
+let closedWindows = 0;
 
 function sendOne(): void {
   const { frame, attempt, describe } = buildAttempt();
@@ -163,7 +169,8 @@ function sendOne(): void {
     if (!attempt.replied) {
       console.log(`${rel()} [attempt ${attemptNo}] NO REPLY within ${REPLY_WINDOW_MS / 1000}s`);
     }
-    if (attempts.length >= repeat) {
+    closedWindows += 1;
+    if (closedWindows >= repeat) { // every attempt's window has closed, not merely been opened
       const ok = attempts.filter((a) => a.replied).length;
       console.log(`${rel()} done: ${ok}/${attempts.length} attempts answered`);
       client.end(true);
