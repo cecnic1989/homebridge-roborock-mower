@@ -323,12 +323,16 @@ describe('RoborockMowerPlatform re-sync', () => {
     connect(clients[0]);
     push(clients[0], '{"123":0,"121":100}'); // idle on the dock, agreeing with the cloud snapshot
     await resync(); // 1 h of silence: quiet is normal, no restart
+    await resync(); // 2 h: still at the threshold
     assert.equal(clients.length, 1);
-    await resync(); // 2 h
-    await resync(); // 3 h
-    assert.equal(clients.length, 1);
-    await resync(); // 4 h of silence: past the threshold, restart the zombie connection
+    await resync(); // 3 h of silence: past the threshold, restart the zombie connection
     assert.equal(clients.length, 2);
+    connect(clients[1]);
+    await resync(); // 1 h after the restart: the clock was re-based, no tight loop
+    assert.equal(clients.length, 2);
+    await resync();
+    await resync(); // 3 h after the restart and still silent: refresh again, so the connection never grows old
+    assert.equal(clients.length, 3);
   });
 
   test('a rename in the Roborock app propagates to the accessory', async () => {
