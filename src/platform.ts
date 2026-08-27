@@ -63,6 +63,9 @@ const MAX_POLL_SECONDS = 86_400;
 const DEFAULT_POLL_SECONDS = 3600;
 const STARTUP_RETRY_MS = 5 * 60_000;
 const STALE_PUSH_MS = 5 * 60_000; // a push this old no longer outranks a disagreeing cloud snapshot
+// A docked mower is legitimately quiet for hours, but this much silence on a connection that claims to be
+// live is the signature of a silently dropped subscription — the broker drops it without disconnecting.
+const SILENT_PUSH_RESTART_MS = 3.5 * 3_600_000;
 const SESSION_EXPIRED = 'session-expired';
 
 function message(error: unknown): string {
@@ -391,6 +394,12 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
           this.log.warn(`${device.name}: no live update for ${Math.round(pushAge / 60_000)} min and the cloud disagrees; `
             + 'applying the cloud snapshot and reconnecting MQTT.');
           staleSubscription = true;
+        } else if (tracked.lastPushAt !== undefined && pushAge > SILENT_PUSH_RESTART_MS && (this.mqtt?.connected ?? false)) {
+          // Agreement is no proof of life (2026-08-26: docked-idle agreed all night, and the 6 AM undock
+          // push never arrived). Restart once; the next real push re-arms this check.
+          this.log.warn(`${device.name}: no live update for ${Math.round(pushAge / 60_000)} min on a live connection; `
+            + 'reconnecting MQTT as a precaution.');
+          staleSubscription = true;
         }
         this.applyDps(tracked, device.deviceStatus ?? {}, 'cloud');
       } else {
@@ -406,6 +415,9 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       }
     }
     if (staleSubscription) {
+      for (const tracked of this.mowers.values()) {
+        tracked.lastPushAt = undefined;
+      }
       this.mqtt?.restart();
     }
   }

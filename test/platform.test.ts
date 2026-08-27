@@ -309,6 +309,28 @@ describe('RoborockMowerPlatform re-sync', () => {
     assert.equal(platform.nextReconcileSeconds(), 3600);
   });
 
+  // 2026-08-26, 6 AM: the subscription died overnight, but docked-idle agreed with the cloud, so the dead
+  // connection went unnoticed; the undock push never arrived and the garage automation never fired.
+  test('hours of push silence on a connected broker forces an MQTT restart even when the cloud agrees', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const { platform, resync } = start({ session, connectMqtt: connectMqtt as never });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":0,"121":100}'); // idle on the dock, agreeing with the cloud snapshot
+    await resync(); // 1 h of silence: quiet is normal, no restart
+    assert.equal(clients.length, 1);
+    await resync(); // 2 h
+    await resync(); // 3 h
+    assert.equal(clients.length, 1);
+    await resync(); // 4 h of silence: past the threshold, restart the zombie connection
+    assert.equal(clients.length, 2);
+  });
+
   test('a rename in the Roborock app propagates to the accessory', async () => {
     let response: object = { success: true, result: home };
     const { platform, accessories, resync } = start({ session, homeResponse: () => response });
