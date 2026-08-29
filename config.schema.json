@@ -67,10 +67,10 @@
       "sensorDebounceSeconds": {
         "title": "Sensor debounce (seconds)",
         "type": "integer",
-        "default": 3,
+        "default": 15,
         "minimum": 0,
         "maximum": 60,
-        "description": "How long a state must hold before its sensor flips. Faults and battery are reported immediately."
+        "description": "How long a state must hold before its sensor flips. Faults and battery are reported immediately. The default absorbs the brief dock-contact flap when the mower resumes from a mid-job charge, which would otherwise re-trigger dock automations."
       }
     }
   },

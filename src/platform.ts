@@ -283,7 +283,9 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       battery: c.exposeBattery ?? true,
       faultIndicator: c.faultIndicator ?? true,
       controls: c.exposeControls ?? false,
-      debounceSeconds: numberOption(c.sensorDebounceSeconds, 3, 0, 60),
+      // 15s absorbs the undock shuffle: resuming from a mid-job charge, the mower re-touches the charge
+      // contacts for a few seconds (2026-08-29: Docked flapped and a garage automation closed the door on it).
+      debounceSeconds: numberOption(c.sensorDebounceSeconds, 15, 0, 60),
     };
   }
 
