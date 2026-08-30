@@ -4,9 +4,10 @@ import { buildV1Frame } from './frame-builder.js';
 // Shared wire-format helpers: the RPC envelope is encoded in exactly one place per direction, so a
 // protocol change is one edit instead of a hunt across test files.
 
-// Lets a serialized request pipeline reach the wire between assertions.
-export const drain = async (turns = 8): Promise<void> => {
-  for (let i = 0; i < turns; i++) {
+// Lets a serialized request pipeline reach the wire between assertions. Eight turns clears the deepest
+// chain in these tests: request() -> requestNow -> publish callback -> finally -> then.
+export const drain = async (): Promise<void> => {
+  for (let i = 0; i < 8; i++) {
     await Promise.resolve();
   }
 };

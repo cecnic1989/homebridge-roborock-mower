@@ -91,6 +91,9 @@ const connect = (client: FakeMqttClient) => {
 const push = (client: FakeMqttClient, dps: string, localKey = 'localkey') =>
   client.emit('message', TOPIC, buildV1Frame(102, 1787457040, `{"t":1787457040,"dps":${dps}}`, localKey));
 
+const reply = (client: FakeMqttClient, body: object) =>
+  client.emit('message', TOPIC, rpcReplyFrame(body, 'localkey'));
+
 const withoutMower = { success: true, result: { ...home, devices: [], receivedDevices: home.receivedDevices } };
 const empty = { success: true, result: { ...home, devices: [], receivedDevices: [], products: [] } };
 
@@ -394,7 +397,7 @@ describe('RoborockMowerPlatform controls', () => {
     const rpc = decodeRpc(client);
     assert.equal(rpc.params.app_button, 'MOW_GLOBAL');
     assert.equal(client.published[0].topic, 'rr/m/i/u1/b7b04791/mower-duid');
-    client.emit('message', TOPIC, rpcReplyFrame({ id: rpc.id, result: ['ok'] }, 'localkey', 1787523488));
+    reply(client, { id: rpc.id, result: ['ok'] });
     await setPromise;
     assert.equal(mow?.value('On'), true);
   });
@@ -425,14 +428,9 @@ describe('RoborockMowerPlatform active liveness probe', () => {
     return { clients, connectMqtt };
   };
 
-  const decodeMowRequest = (client: FakeMqttClient) => decodeRpcAt(client.published, 'localkey');
-
-  const reply2 = (client: FakeMqttClient, body: object) =>
-    client.emit('message', TOPIC, rpcReplyFrame(body, 'localkey'));
-
   const answerLastProbe = (client: FakeMqttClient) => {
-    const { rpc } = decodeMowRequest(client);
-    reply2(client, { id: rpc.id, result: 'unknown_method' });
+    const { rpc } = decodeRpcAt(client.published, 'localkey');
+    reply(client, { id: rpc.id, result: 'unknown_method' });
   };
 
   // Drives one liveness tick where the probe goes unanswered: the 10s request timeout is mock-ticked.
@@ -545,7 +543,7 @@ describe('RoborockMowerPlatform active liveness probe', () => {
     await platform.whenStarted();
     connect(client);
     clock.now += 20 * 60_000;
-    client.emit('message', TOPIC, rpcReplyFrame({ id: 31999, result: ['ok'] }, 'localkey')); // not ours
+    reply(client, { id: 31999, result: ['ok'] }); // a reply meant for another client
     const before = client.published.length;
     await platform.livenessTick();
     assert.equal(client.published.length, before, 'someone else\'s reply still proves the subscription delivers');

@@ -7,93 +7,89 @@
 [![npm version](https://img.shields.io/npm/v/@cecnic1989/homebridge-roborock-mower.svg)](https://www.npmjs.com/package/@cecnic1989/homebridge-roborock-mower)
 [![Build and Lint](https://img.shields.io/github/actions/workflow/status/cecnic1989/homebridge-roborock-mower/build.yml?branch=latest)](https://github.com/cecnic1989/homebridge-roborock-mower/actions/workflows/build.yml)
 
-Homebridge plugin for Roborock RockMow robot lawn mowers. Exposes your mower to Apple Home.
-
-> **Early development.** Status sensors and battery work (tested on a RockMow Z1 / X120H). Controls are next.
+Apple Home support for Roborock RockMow robot lawn mowers. Tested on a RockMow Z1 / X120H.
 
 ## Features
 
-- **State sensors** for Home-app automations: Docked, Leaving, Mowing, Returning (each a contact sensor, live via Roborock's cloud push)
-- **Needs Attention** sensor for Home-app notifications when the mower is stuck, faulted, or was stopped with its button
-- **Battery** level, charging state, low-battery flag
-- **Fault indicator** on every sensor when the mower reports an error
-
-- **Mow and Pause switches** (optional) to start, dock, pause and resume from Home automations and Siri
+- **State sensors** — Docked, Leaving, Mowing, Returning; contact sensors driven by Roborock's cloud push
+- **Needs Attention** — opens when the mower is stuck, faulted, or stopped with its button
+- **Battery** — level, charging state, low-battery flag
+- **Mow and Pause switches** — optional; start, dock, pause and resume from Siri or automations
 
 ## Automations
 
-Each state is a contact sensor so the Home app can trigger on it ("A Sensor Detects Something"):
+Each state is a contact sensor, so Home triggers on it with *A Sensor Detects Something*:
 
 | Sensor | Opens when | Closes when |
 |---|---|---|
-| **Docked** | it leaves the dock | it is back on the dock (charging or charged) |
+| **Docked** | it leaves the dock | it is back on the dock |
 | **Leaving** | a job starts (initializing / undocking) | it begins cutting |
 | **Mowing** | it starts cutting or driving to a zone | cutting stops |
 | **Returning** | it heads back to the dock | it reaches the dock |
-| **Needs Attention** | it reports an error, a fault, or its STOP button was pressed | the condition clears |
+| **Needs Attention** | it reports an error or fault, or STOP was pressed | the condition clears |
 
-Example for a dock inside a garage: *Docked opens → open garage*, *Mowing opens → close garage*, *Returning opens → open garage*, *Docked closes → close garage*.
-Prefer **Docked opens** over *Leaving opens* for the departure trigger: both fire on the same push, but Docked can only open once per trip. The mower starts driving ~1.5 s after that push, so if the door needs longer, add a time-based automation on the mowing schedule as well.
+**Dock inside a garage.** Use *Docked opens → open door*, *Returning opens → open door*, *Docked closes → close door*.
+
+Two things to know before automating the door:
+
+- **Do not close the door on Mowing.** Mowing opens while the mower is still inside the garage. Leave the door open for the duration of the mow, or close it on a timer.
+- Prefer **Docked opens** over *Leaving opens* to trigger the departure: both fire on the same push, but Docked can only open once per trip. The mower starts moving ~1.5 s later, so if your door is slow, also trigger from the mowing schedule.
+
+**Notifications** need no automation: open the *Needs Attention* sensor in Home → *Status and Notifications* → *Notify when opens*. Pauses made from the Roborock app do not trigger it.
 
 ## Controls
 
-Off by default. Turn on **Control switches (Mow, Pause)** in the plugin settings and restart Homebridge to add two switches:
+Off by default. Enable **Control switches (Mow, Pause)** in the plugin settings and restart Homebridge:
 
 | Switch | Turn on | Turn off |
 |---|---|---|
 | **Mow** | start a full-lawn mow | send it back to the dock |
 | **Pause** | pause the current job | resume it |
 
-The switches always show the mower's real state, so a job started from the Roborock app reads as Mow on, and a finished job reads off. A paused or rain-delayed job still counts as Mow on — turning Mow off then cancels it and docks the mower. A command that the mower rejects (or that times out) shows as an error in Home and the switch keeps its true value.
+Switches reflect the mower's real state, so a job started in the Roborock app reads as Mow on. A paused or rain-delayed job still counts as on — turning Mow off then cancels it and docks. Rejected or unanswered commands surface as an error in Home and the switch keeps its true value.
 
-Siri: "turn on RockMow Mow", "turn on RockMow Pause". Automations: "when everyone leaves → turn on Mow", "when rain is detected → turn off Mow".
+> **Scenes:** "turn everything on" flips every switch in the room, including Mow. Keep the switches out of scenes, or leave controls off.
 
-> **Scenes:** "turn everything on" (a scene, or Siri) flips every switch in the room — including Mow. Keep the switches out of scenes, or leave controls off if you use all-on scenes.
+## Behaviour notes
 
-**Notifications:** no automation needed — in the Home app open the *Needs Attention* sensor → *Status and Notifications* → turn on *Notify when opens*. It opens on the push that reports the problem (no debounce). Pauses made from the app do not trigger it.
-
-Accessories take the name you gave the mower in the Roborock app (renames follow on the next sync); names you set in the Home app are kept.
-
-Sensors flip only after a state holds for `sensorDebounceSeconds` (default 3 s); faults and battery update immediately. While the cloud connection is down, sensors show as inactive rather than stale.
+- Accessories take the mower's name from the Roborock app; names you set in Home are kept.
+- Sensors flip only after a state holds for `sensorDebounceSeconds`. This rides out the brief dock-contact flap when the mower resumes from a mid-job charge, which would otherwise re-trigger dock automations. Faults and battery update immediately.
+- Roborock's servers sometimes stop delivering updates without the connection appearing to drop. The plugin detects this and reconnects on its own; sensors show as inactive rather than stale while it does.
 
 ## Requirements
 
 - Homebridge `^1.8.0` or `^2.0.0-beta.0`
 - Node.js `^20.19.0 || ^22.10.0 || ^24.0.0`
-- A Roborock account (same credentials as the Roborock mobile app)
+- A Roborock account (same credentials as the mobile app)
 
-## Installation
+## Setup
 
-Homebridge UI: **Plugins** → search `@cecnic1989/homebridge-roborock-mower`.
+Install from the Homebridge UI: **Plugins** → search `@cecnic1989/homebridge-roborock-mower`.
 
-## Configuration
+Then **Plugins** → **Roborock Mower** → **Settings**: enter your Roborock email, press **Send code**, enter the emailed code, press **Verify & save**, and restart Homebridge.
 
-1. Homebridge UI → **Plugins** → **Roborock Mower** → **Settings**.
-2. Enter your Roborock account email and press **Send code**.
-3. Enter the verification code Roborock emails you and press **Verify & save**.
-4. Restart Homebridge.
+Sign-in stores a cloud token in `<homebridge storage>/roborock-mower/session.json` (owner-only). Treat it like a password; **Sign out** removes it.
 
-Sign-in stores the cloud token in `<homebridge storage>/roborock-mower/session.json` (owner-only permissions); treat it like a password. Use **Sign out** in the settings page to remove it.
-
-Optional fields:
+## Options
 
 | Field | Default | Description |
 |---|---|---|
 | `exposeDocked`, `exposeLeaving`, `exposeMowing`, `exposeReturning` | `true` | Which state sensors to create |
-| `exposeAttention` | `true` | Needs Attention sensor (errors, faults, emergency stop) |
-| `exposeControls` | `false` | Mow and Pause switches |
+| `exposeAttention` | `true` | Needs Attention sensor |
 | `exposeBattery` | `true` | Battery service |
-| `faultIndicator` | `true` | Set StatusFault on the sensors when the mower reports an error |
-| `sensorDebounceSeconds` | `3` | How long a state must hold before its sensor flips (0–60) |
-| `pollInterval` | `3600` | Cloud re-sync interval in seconds (min 900). Live state comes by push; Roborock rate-limits this call, so keep it high |
+| `exposeControls` | `false` | Mow and Pause switches |
+| `faultIndicator` | `true` | Set StatusFault on sensors when the mower reports an error |
+| `sensorDebounceSeconds` | `15` | How long a state must hold before its sensor flips (0–60) |
+| `mqttLivenessProbe` | `true` | Check the live connection is still delivering, and reconnect if not |
+| `pollInterval` | `3600` | Cloud re-sync interval in seconds (min 900). Live state arrives by push and Roborock rate-limits this call, so keep it high |
 
 ## Support
 
-If your mower isn't picked up, or a control doesn't behave correctly on it, [open an issue](https://github.com/cecnic1989/homebridge-roborock-mower/issues) with your model number and Homebridge debug logs (`homebridge -D`).
+If your mower isn't picked up or a control misbehaves, [open an issue](https://github.com/cecnic1989/homebridge-roborock-mower/issues) with your model number and debug logs (`homebridge -D`).
 
 ## Development
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, local testing, and design notes.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, testing, and design notes.
 
 ## License
 

@@ -107,9 +107,8 @@ describe('RoborockMqtt RPC', () => {
     const pending = mqtt.request('duid-1', 'remote_pb', { app_button: 'CHARGE' });
     await drain();
     const { rpc } = decodeRequest(client);
-    const ts = 1787523488;
-    client.emit('message', 'rr/m/o/u1/b7b04791/duid-2', buildV1Frame(102, ts,
-      JSON.stringify({ t: ts, dps: { 102: JSON.stringify({ id: rpc.id, result: ['nope'] }) } }), 'otherkey'));
+    client.emit('message', 'rr/m/o/u1/b7b04791/duid-2',
+      rpcReplyFrame({ id: rpc.id, result: ['nope'] }, 'otherkey', 1787523488));
     let settled = false;
     void pending.then(() => {
       settled = true;
