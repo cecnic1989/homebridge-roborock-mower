@@ -26,7 +26,7 @@ class RpcErrorReply extends Error {}
 class RequestAborted extends Error {}
 
 // The request went out and nothing came back — the only failure that actually indicts the subscription.
-class RequestTimeout extends Error {}
+export class RequestTimeout extends Error {}
 
 export type ProbeOutcome = 'alive' | 'skipped' | 'dead';
 
@@ -40,6 +40,10 @@ export function mqttCredentials(rriot: Pick<RRiot, 'u' | 's' | 'k'> & { r: Pick<
     username: md5hex(`${rriot.u}:${rriot.k}`).slice(2, 10),
     password: md5hex(`${rriot.s}:${rriot.k}`).slice(16),
   };
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 interface Subscription {
@@ -183,9 +187,11 @@ export class RoborockMqtt {
       const queue = this.commandQueues.get(duid) ?? { running: false };
       this.commandQueues.set(duid, queue);
       const job: QueuedCommand = {
+        // Queue bookkeeping settles BEFORE the caller is notified, so busy() answers correctly from a
+        // caller's catch block: an empty queue is already gone, a queued successor is already running.
         start: () => this.requestNow(duid, method, params, timeoutMs)
-          .then(resolve, reject)
-          .finally(() => this.onCommandSettled(duid, queue)),
+          .finally(() => this.onCommandSettled(duid, queue))
+          .then(resolve, reject),
         cancel: (reason) => reject(new Error(reason)),
       };
       if (queue.running) {
@@ -223,16 +229,23 @@ export class RoborockMqtt {
     return this.commandQueues.size > 0;
   }
 
+  // Runs from a .finally() ahead of the caller's settlement, so it must never throw: a synchronous failure
+  // starting the successor would otherwise replace the predecessor's result and leave the successor hanging.
   private onCommandSettled(duid: string, queue: CommandQueue): void {
     if (this.commandQueues.get(duid) !== queue) {
       return; // the queue was torn down (stop/restart/unsubscribe) while this command was settling
     }
     const next = queue.queued;
     queue.queued = undefined;
-    if (next) {
-      next.start();
-    } else {
+    if (!next) {
       this.commandQueues.delete(duid);
+      return;
+    }
+    try {
+      next.start();
+    } catch (error) {
+      this.commandQueues.delete(duid);
+      next.cancel(message(error));
     }
   }
 

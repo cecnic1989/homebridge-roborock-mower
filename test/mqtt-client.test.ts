@@ -3,9 +3,9 @@ import { EventEmitter } from 'node:events';
 import { describe, mock, test } from 'node:test';
 
 import { mqttCredentials, RoborockMqtt } from '../src/roborock/mqtt-client.js';
-import { decodeFrames } from '../src/roborock/v1-protocol.js';
 import { buildV1Frame } from './frame-builder.js';
 import { silentLog } from './helpers.js';
+import { decodeRpcAt, drain, rpcReplyFrame } from './wire.js';
 
 const rriot = { u: 'u1', s: 's1', h: 'h1', k: 'k1', r: { m: 'ssl://mqtt-us-2.roborock.com:8883' } };
 
@@ -54,22 +54,11 @@ function liveMqtt() {
 }
 
 function decodeRequest(client: FakeClient, index = 0) {
-  const { topic, payload } = client.published[index];
-  const [frame] = decodeFrames(payload, 'localkey');
-  const envelope = JSON.parse(frame.payload.toString('utf8')) as { t: number; dps: Record<string, string> };
-  return { topic, frame, rpc: JSON.parse(envelope.dps['101']) as { id: number; method: string; params: Record<string, unknown> } };
+  return { topic: client.published[index].topic, ...decodeRpcAt(client.published, 'localkey', index) };
 }
 
-// request() serializes through a promise chain; a few microtask turns let a queued publish reach the wire.
-const drain = async () => {
-  for (let i = 0; i < 4; i++) {
-    await Promise.resolve();
-  }
-};
-
 function reply(client: FakeClient, body: object) {
-  const ts = 1787523488;
-  client.emit('message', OUT_TOPIC, buildV1Frame(102, ts, JSON.stringify({ t: ts, dps: { 102: JSON.stringify(body) } }), 'localkey'));
+  client.emit('message', OUT_TOPIC, rpcReplyFrame(body, 'localkey', 1787523488));
 }
 
 describe('mqttCredentials', () => {
@@ -294,6 +283,19 @@ describe('RoborockMqtt liveness probe', () => {
     } finally {
       mock.restoreAll();
     }
+  });
+
+  test('a successor that throws while starting cannot hijack the predecessor\'s result or hang itself', async () => {
+    const { client, mqtt } = liveMqtt();
+    const first = mqtt.request('duid-1', 'remote_pb', { app_button: 'MOW_GLOBAL' });
+    const second = mqtt.request('duid-1', 'remote_pb', () => {
+      throw new Error('encode failed'); // the thunk runs synchronously inside the queue's settle path
+    });
+    const secondFailure = assert.rejects(second, /encode failed/);
+    await drain();
+    reply(client, { id: decodeRequest(client).rpc.id, result: ['ok'] });
+    assert.deepEqual(await first, ['ok'], 'the first command keeps its own result');
+    await secondFailure;
   });
 
   test('a local publish failure resolves skipped, not dead: it never tested the subscription', async () => {
