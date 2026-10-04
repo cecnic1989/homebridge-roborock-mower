@@ -14,7 +14,7 @@ const allOn: SensorOptions = {
 
 function state(overrides: Partial<DerivedState> = {}): DerivedState {
   return {
-    docked: true, leaving: false, mowing: false, returning: false, homeward: false, away: false,
+    position: 'dock', reported: true, docked: true, leaving: false, mowing: false, returning: false, away: false,
     charging: false, paused: false, fault: false, attention: false,
     jobActive: false, battery: 100, lowBattery: false, mowState: 0, errorCode: 0, ...overrides,
   };

@@ -3,7 +3,7 @@ import type mqtt from 'mqtt';
 
 import { MowerAccessory, type SensorOptions } from './mower/accessory.js';
 import { ACTION_LABELS, isOk, LIVENESS_PROBE, type MowerAction, remotePbParams } from './mower/commands.js';
-import { DPS, type DerivedState, type Dps, deriveMowerState, describeAttention, describeMowState, settleState } from './mower/state.js';
+import { DPS, type DerivedState, type Dps, type Since, deriveMowerState, describeAttention, describeMowState, settleState } from './mower/state.js';
 import { findMowers, type MowerDevice } from './roborock/mower.js';
 import { RequestTimeout, RoborockMqtt } from './roborock/mqtt-client.js';
 import { type PlatformStatus, readSession, type StatusDevice, writeStatus } from './roborock/session-store.js';
@@ -62,7 +62,7 @@ interface TrackedMower {
   probeRestarted: boolean;
   probeDormant: boolean;
   healArmed: boolean; // per mower: a sibling's traffic says nothing about THIS mower's subscription
-  silentSince?: number; // when the run of codes that place the mower nowhere started, bounding what is held
+  since: Since; // when the mower entered its position, and when the current bare-idle run began
 }
 
 const MIN_POLL_SECONDS = 900; // Roborock rate-limits home data; python-roborock budgets 5/hour.
@@ -515,6 +515,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     const tracked: TrackedMower = {
       device, online: true, platformAccessory, accessory, dps: {},
       probeFailures: 0, probeRestarted: false, probeDormant: false, healArmed: true,
+      since: { position: undefined, idle: undefined },
       // The connect transition may already have passed (fresh install: the broker connects before the
       // startup cloud sync tracks the mower); seed the clock now so the passive check covers it.
       lastAliveAt: this.mqtt?.connected ? this.now() : undefined,
@@ -708,10 +709,10 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     }
     // Only the heal path is taken as read: it has just declared the live state wrong, so nothing may be held
     // over it. An ordinary snapshot is merged like any other news, and what it settles nothing about stands.
-    const { state, silentSince } = source === 'heal'
-      ? { state: deriveMowerState(tracked.dps), silentSince: undefined }
-      : settleState(tracked.dps, contactBefore, tracked.last, tracked.silentSince, this.now());
-    tracked.silentSince = silentSince;
+    const { state, since } = source === 'heal'
+      ? { state: deriveMowerState(tracked.dps), since: { position: this.now(), idle: undefined } }
+      : settleState(tracked.dps, contactBefore, tracked.last, tracked.since, this.now());
+    tracked.since = since;
     if (state.mowState !== tracked.last?.mowState) {
       this.log.info(`${tracked.device.name}: ${describeMowState(state.mowState)} (battery ${state.battery ?? '?'}%)`);
     }

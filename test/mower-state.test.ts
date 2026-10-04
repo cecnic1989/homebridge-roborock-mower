@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
 import {
-  type DerivedState, IDLE_HOLD_MAX_MS, POSITION_HOLD_MAX_MS, deriveMowerState, describeAttention, describeMowState, settleState,
+  type DerivedState, IDLE_HOLD_MAX_MS, REJOIN_GRACE_MS, type Since, deriveMowerState, describeAttention, describeMowState,
+  settleState,
 } from '../src/mower/state.js';
 
 // Real sequence captured from a RockMow a282 (edge cut started and returned from the app), see fixtures/dps-sequence.json.
@@ -120,12 +121,12 @@ describe('deriveMowerState edge cases', () => {
 function replayPushes(steps: { at: number; dps: Record<number, unknown> }[]): DerivedState[] {
   const dps: Record<number, unknown> = {};
   let prev: DerivedState | undefined;
-  let silentSince: number | undefined;
+  let since: Since = { position: undefined, idle: undefined };
   return steps.map((step) => {
     const contactBefore = dps[127];
     Object.assign(dps, step.dps);
-    const settled = settleState(dps, contactBefore, prev, silentSince, step.at);
-    silentSince = settled.silentSince;
+    const settled = settleState(dps, contactBefore, prev, since, step.at);
+    since = settled.since;
     prev = settled.state;
     return settled.state;
   });
@@ -162,17 +163,32 @@ describe('leaving the dock', () => {
     assert.equal(states[3].returning, true, 'a rain return is not mistaken for a departure');
   });
 
-  test('a start that gives up and idles on the dock reads as docked again, and a retry as a fresh departure', () => {
+  // A departure is read as a departure while the re-seat could still explain the contact. Past that window a
+  // mower still sitting on the contacts never left, and unlike a mower out on the lawn it cannot be shut out
+  // by saying so — the dock is where it was all along.
+  test('a start that stalls is back on the dock once the re-seat window has passed', () => {
     const states = replayPushes([
       { at: 0, dps: chargingMidJob },
       { at: 1_000, dps: { 123: 51 } },
-      { at: 5_000, dps: { 123: 0 } }, // gives up and sits on the dock, DPS 132 still set
-      { at: POSITION_HOLD_MAX_MS + 6_000, dps: { 121: 86 } }, // idle too long to still be the exit shuffle
-      { at: POSITION_HOLD_MAX_MS + 7_000, dps: { 123: 51 } }, // tries again, and needs the door open as much
+      { at: 5_000, dps: { 123: 0 } }, // gives up, DPS 132 still set, contact unchanged
+      { at: REJOIN_GRACE_MS, dps: { 121: 86 } }, // still inside the window: still a departure
+      { at: REJOIN_GRACE_MS + 6_000, dps: { 121: 85 } },
+      { at: REJOIN_GRACE_MS + 7_000, dps: { 123: 51 } }, // and now it tries again
     ]);
-    assert.deepEqual(states.map((state) => state.docked), [true, false, false, true, false]);
-    assert.deepEqual(states.map((state) => state.leaving), [false, true, true, false, true],
-      'Leaving must not stick open on the dock, or the retry has no rising edge to trigger on');
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false, false, true, false]);
+    // Deliberate: while the mower is still reporting a mow-start code it is still leaving, so a retry inside
+    // one stalled start gives Leaving no fresh edge. Automate the departure from Docked, which does edge.
+    assert.deepEqual(states.map((state) => state.leaving), [false, true, true, true, false, true]);
+  });
+
+  test('a departure cancelled out on the lawn is out, not still leaving', () => {
+    const states = replayPushes([
+      { at: 0, dps: chargingMidJob },
+      { at: 1_000, dps: { 123: 52, 127: 0 } }, // undocking, off the contacts
+      { at: 5_000, dps: { 123: 0, 122: 0, 132: 0 } }, // cancelled from the app before any mow code arrived
+    ]);
+    assert.deepEqual(states.map((state) => state.position), ['dock', 'leaving', 'out']);
+    assert.equal(states[2].leaving, false, 'or the Mow switch stays on for good');
   });
 
   // DPS 127 is the one push known to go missing. If the "contacts clear" push is lost, the contact still
@@ -201,7 +217,7 @@ describe('leaving the dock', () => {
       { at: 20_000, dps: { 123: 0 } },
     ]);
     assert.deepEqual(states.map((state) => state.returning), [false, true, true]);
-    assert.deepEqual(states.map((state) => state.homeward), [false, true, true]);
+    assert.deepEqual(states.map((state) => state.position), ['out', 'returning', 'returning']);
   });
 
   // 2026-08-26: a rain return reported 61 while the mower was still outside a closed garage. The contact is
@@ -316,7 +332,7 @@ describe('leaving the dock', () => {
       { at: 0, dps: chargingMidJob },
       { at: 1_000, dps: { 123: 51 } },
       { at: 5_000, dps: { 123: 69 } }, // mow_dock_fault
-      { at: POSITION_HOLD_MAX_MS + 6_000, dps: { 121: 84 } },
+      { at: REJOIN_GRACE_MS + 6_000, dps: { 121: 84 } }, // still on the contacts well past the re-seat window
     ]);
     assert.deepEqual(states.map((state) => state.docked), [true, false, false, true]);
     assert.equal(states[2].attention, true, 'and it says it needs attention on the push that reports it');
@@ -360,6 +376,87 @@ describe('settleState over the captured sequence', () => {
       })),
     ]);
     assert.deepEqual(states.slice(1).map((state) => state.docked), [true, false, false, false]);
+  });
+});
+
+// The three findings v0.7.0 shipped with were all invariant violations between correlated booleans. With one
+// position behind them they are not expressible, so these pin the guarantee rather than the old symptoms.
+// A position that can only be left on evidence needs enough evidence to leave on, or it latches. A charge
+// contact that has just changed is current, so it is consulted ahead of everything but a state code.
+describe('a changed charge contact is current evidence', () => {
+  test('a mower waiting out rain docks when the contact says it got there, with 123 still on 61', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 20, 123: 55, 127: 0, 132: 1, 143: 0 } }, // mowing
+      { at: 10_000, dps: { 123: 61 } }, // rain: heading home
+      { at: 74_000, dps: { 127: 1 } }, // arrives and starts charging; the code never moves off 61
+    ]);
+    assert.deepEqual(states.map((state) => state.position), ['out', 'returning', 'dock']);
+    assert.equal(states[2].charging, true, 'charging and docked, not charging and returning');
+  });
+
+  test('an arrival split across two pushes still arrives', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 40, 123: 0, 127: 0, 132: 0, 143: 104 } }, // off dock, task over, heading back
+      { at: 10_000, dps: { 127: 2 } }, // the capture's arrival, with 143 lagging a push behind
+      { at: 11_000, dps: { 143: 0 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.position), ['returning', 'dock', 'dock']);
+  });
+
+  // Only once the mower stops claiming a mow-start code: while 123 still reads 51 it is reporting that it is
+  // starting, and its own word outranks the contact.
+  test('a stalled departure docks on the contact once the re-seat window has passed, not before', () => {
+    const start: { at: number; dps: Record<number, unknown> }[] = [
+      { at: 0, dps: { 121: 100, 123: 153, 127: 2, 132: 1, 143: 0 } },
+      { at: 1_000, dps: { 123: 51, 127: 0 } }, // starts leaving, contacts clear
+      { at: 2_000, dps: { 123: 0 } }, // and stops saying anything about where it is
+    ];
+    const inside = replayPushes([...start, { at: 5_000, dps: { 127: 2 } }]); // re-seats: the exit shuffle
+    assert.deepEqual(inside.map((state) => state.docked), [true, false, false, false]);
+    const outside = replayPushes([...start, { at: REJOIN_GRACE_MS + 2_000, dps: { 127: 2 } }]);
+    assert.deepEqual(outside.map((state) => state.docked), [true, false, false, true]);
+  });
+});
+
+describe('position as the single source of truth', () => {
+  test('docked and returning are never both true, across every sequence in this file', () => {
+    const sequences = [
+      [{ at: 0, dps: chargingMidJob }, { at: 1_000, dps: { 123: 51 } }, { at: 2_000, dps: { 123: 0, 127: 1 } }],
+      [{ at: 0, dps: mowingMidJob }, { at: 1_000, dps: { 123: 61 } }, { at: 2_000, dps: { 123: 76, 127: 1 } }],
+      [{ at: 0, dps: mowingMidJob }, { at: 1_000, dps: { 123: 71 } }, { at: 2_000, dps: { 123: 0, 127: 2, 143: 0 } }],
+      [{ at: 0, dps: seed }, { at: 1_000, dps: { 123: 2 } }, { at: 2_000, dps: { 127: 0, 143: 104 } }],
+    ];
+    for (const steps of sequences) {
+      for (const state of replayPushes(steps)) {
+        assert.equal(state.docked && state.returning, false, `${state.position} claimed both`);
+        assert.equal(state.docked && state.away, false, `${state.position} is docked and away at once`);
+        assert.equal(state.docked, state.position === 'dock');
+      }
+    }
+  });
+
+  // 2026-10-03 review round 13, finding 1: the position used to revert to the charge contact when a hold
+  // expired, so a mower paused on the lawn with a stale contact had its garage closed on it ten minutes in.
+  test('a mower paused out on the lawn stays out, however long nothing new arrives', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 40, 123: 55, 127: 1, 132: 1, 143: 0 } }, // mowing; the contacts-clear push was lost
+      { at: 60_000, dps: { 123: 58 } }, // paused from the app, out on the lawn
+      { at: 660_000, dps: { 121: 38 } }, // eleven minutes later, just a battery push
+      { at: 3_660_000, dps: { 121: 36 } }, // an hour later, still only battery pushes
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [false, false, false, false]);
+  });
+
+  // ...finding 3: `homeward` latched with no reset, so the next departure reported itself as a return.
+  test('a departure after an arrival is a departure, not another return', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 40, 123: 71, 127: 0, 132: 1, 143: 104 } }, // heading home
+      { at: 74_000, dps: { 123: 0, 127: 2, 143: 0 } }, // arrives, the capture's signature
+      { at: 200_000, dps: { 132: 0 } }, // job ends, idling on the dock
+      { at: 300_000, dps: { 127: 0 } }, // and off it goes again
+    ]);
+    assert.deepEqual(states.map((state) => state.position), ['returning', 'dock', 'dock', 'out']);
+    assert.deepEqual(states.map((state) => state.returning), [true, false, false, false]);
   });
 });
 
