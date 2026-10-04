@@ -343,12 +343,30 @@ describe('leaving the dock', () => {
     assert.equal(deriveMowerState({ 121: 100, 123: 152, 127: 2, 143: 104 }).docked, true);
   });
 
-  // The capture shows the end push ({122,123,132}) landing before DPS 143, so a job can end out on the lawn
-  // with the job flag already cleared. If the contacts-clear push was lost too, 143 is the only truth left.
-  test('off-dock-no-task (143) outranks a stale charge contact, with no job left to vouch for it', () => {
-    const state = deriveMowerState({ 121: 55, 122: 0, 123: 0, 127: 2, 132: 0, 143: 104 });
-    assert.equal(state.docked, false, 'DPS 143 says it is off the dock, whatever the contact reads');
-    assert.equal(state.returning, true, 'and nothing suppresses the sensor that says so');
+  // 2026-10-04 03:08: DPS 143 went non-zero on a mower docked at charge-complete, the plugin called it off
+  // the dock, and the garage door opened in the night. 143 only says where the mower is when nothing is on
+  // the contacts. Keeping a mower that really is out, out, is the state machine's job — shown here too,
+  // since the capture has the end push landing before 143 and so the job flag is already gone.
+  test('DPS 143 keeps a mower that is out, out, without moving one that is docked', () => {
+    const out = replayPushes([
+      { at: 0, dps: { 121: 55, 123: 55, 127: 1, 132: 1, 143: 0 } }, // mowing; the contacts-clear push was lost
+      { at: 10_000, dps: { 122: 0, 123: 0, 132: 0, 143: 104 } }, // and the task ends out on the lawn
+    ]);
+    // With the contact stale it reads `out`, not `returning`: the only thing saying it is away is the
+    // position already held. Harmless — `docked` never goes true, so the door is never closed behind it.
+    assert.deepEqual(out.map((state) => state.position), ['out', 'out']);
+    // With the contact clear, 143 is believed, and it is the only homeward signal a normal end-of-mow
+    // return gives on this firmware — no 71-75 code ever arrives.
+    const home = replayPushes([
+      { at: 0, dps: { 121: 55, 123: 55, 127: 0, 132: 1, 143: 0 } },
+      { at: 10_000, dps: { 122: 0, 123: 0, 132: 0, 143: 104 } },
+    ]);
+    assert.deepEqual(home.map((state) => state.returning), [false, true]);
+    const parked = replayPushes([
+      { at: 0, dps: { 121: 100, 123: 0, 127: 2, 132: 0, 143: 0 } }, // parked overnight, charge complete
+      { at: 10_000, dps: { 143: 104 } }, // 143 goes non-zero where it sits, touching nothing else
+    ]);
+    assert.deepEqual(parked.map((state) => state.docked), [true, true], 'the door must not open at 3am');
   });
 
   test('a map rebuild leaves the dock like a mow does, though it is not mowing', () => {

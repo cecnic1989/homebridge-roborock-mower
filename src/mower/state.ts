@@ -102,6 +102,11 @@ function codePosition(code: number): Position | undefined {
 // What the evidence says, strongest first: a code that places the mower, then the 61-63 waits (reported both
 // on the way home and while waiting it out on the dock, so the contact says which), then DPS 143. Undefined
 // when only the charge contact is left — the one reading that may be stale.
+//
+// DPS 143 ("off dock, no task") cannot overrule a contact that says the mower is seated: 2026-10-04 03:08 it
+// went non-zero on a mower docked at charge-complete and the garage door opened in the night. It is only
+// evidence of where the mower is when nothing is touching the contacts. A mower that really is out is kept
+// out by `nextPosition`, which will not dock one without a *current* contact, so nothing is lost here.
 function positionFromEvidence(code: number, onContact: boolean, offDock: boolean): Position | undefined {
   const fromCode = codePosition(code);
   if (fromCode !== undefined) {
@@ -110,7 +115,7 @@ function positionFromEvidence(code: number, onContact: boolean, offDock: boolean
   if (DOCK_WAIT_STATES.has(code)) {
     return onContact ? 'dock' : 'returning';
   }
-  return offDock ? 'returning' : undefined;
+  return offDock && !onContact ? 'returning' : undefined;
 }
 
 export function deriveMowerState(dps: Dps): DerivedState {
@@ -194,8 +199,11 @@ function nextPosition(state: DerivedState, prev: DerivedState, contact: Contact,
   if (!contact.on && contact.changed) {
     return prev.position === 'dock' ? 'out' : prev.position; // nothing breaks a contact without moving
   }
+  // Only DPS 143 is left by here, and it is believed because the contact is clear (see positionFromEvidence).
+  // Away with no task means it has left the dock, or is on its way back — and on this firmware a normal
+  // end-of-mow return reports nothing else at all, so this is the only signal the Returning sensor gets.
   if (state.reported) {
-    return prev.position === 'dock' ? 'returning' : prev.position; // only DPS 143 is left by here
+    return 'returning';
   }
   // A departure is over when the job behind it ends — a cancellation says so outright, even mid-shuffle — or
   // once re-seating can no longer explain the contact. Both are needed: a remote-control undock has no job
