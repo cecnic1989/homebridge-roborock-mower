@@ -197,9 +197,11 @@ function nextPosition(state: DerivedState, prev: DerivedState, contact: Contact,
   if (state.reported) {
     return prev.position === 'dock' ? 'returning' : prev.position; // only DPS 143 is left by here
   }
-  // A job *ending* under a departure that never became a mow settles an otherwise stalled one. It has to be
-  // the transition: a remote-control undock never has a job flag, and must keep its re-seat window.
-  if (prev.position === 'leaving' && prev.jobActive && !state.jobActive) {
+  // A departure is over when the job behind it ends — a cancellation says so outright, even mid-shuffle — or
+  // once re-seating can no longer explain the contact. Both are needed: a remote-control undock has no job
+  // at any point and would otherwise settle on its first push, losing the window it depends on. The rung
+  // above has claimed every seated case by here, so in practice this is a mower that left and went quiet.
+  if (prev.position === 'leaving' && ((prev.jobActive && !state.jobActive) || !reSeating)) {
     return contact.on ? 'dock' : 'out';
   }
   return prev.position;

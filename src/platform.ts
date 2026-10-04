@@ -717,11 +717,12 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     if (state.mowState !== tracked.last?.mowState) {
       this.log.info(`${tracked.device.name}: ${describeMowState(state.mowState)} (battery ${state.battery ?? '?'}%)`);
     }
-    // A charge-contact flap changes no other DPS, so without this the dock decision — which drives the
-    // garage automations — leaves no trace above debug level.
-    if (tracked.last !== undefined && state.docked !== tracked.last.docked) {
-      this.log.info(`${tracked.device.name}: ${state.docked ? 'back on the dock' : 'off the dock'}`
-        + ` (charge state ${tracked.dps[DPS.CHARGE_STATE] ?? '-'}, ${describeMowState(state.mowState)})`);
+    // Every position change, with the evidence behind it. A charge-contact flap changes no other DPS, so
+    // without this the decision that drives the garage automations leaves no trace above debug level.
+    if (tracked.last !== undefined && state.position !== tracked.last.position) {
+      this.log.info(`${tracked.device.name}: ${tracked.last.position} -> ${state.position}`
+        + ` (${describeMowState(state.mowState)}, charge state ${tracked.dps[DPS.CHARGE_STATE] ?? '-'}`
+        + `${contactChanged ? ' changed' : ''}, job ${state.jobActive ? 'on' : 'off'})`);
     }
     if (state.attention && !tracked.last?.attention) {
       this.log.warn(`${tracked.device.name}: needs attention — ${describeAttention(state)}`);

@@ -192,6 +192,32 @@ describe('leaving the dock', () => {
     assert.deepEqual(states.map((state) => state.docked), [true, false, true]);
   });
 
+  // No job flag at any point, so nothing ever says the departure ended: without the re-seat window as a
+  // backstop this one sat in `leaving` for good, showing the Mow switch on for a mower doing nothing.
+  test('a remote undock that gets out and goes quiet stops reporting itself as leaving', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 100, 123: 152, 127: 2, 132: 0, 143: 0 } },
+      { at: 1_000, dps: { 123: 70, 127: 0 } }, // driven out under remote control
+      { at: 5_000, dps: { 123: 0 } }, // and then it stops saying anything at all
+      { at: REJOIN_GRACE_MS + 9_000, dps: { 121: 99 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.position), ['dock', 'leaving', 'leaving', 'out']);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false, false], 'and never shuts the door on it');
+  });
+
+  // The mirror of the remote-undock latch: here the job flag never clears, because the end push never comes.
+  // Past the re-seat window the mower is off the contacts and demonstrably not departing any more.
+  test('a departure that faults out on the lawn stops reporting itself as leaving', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 100, 123: 153, 127: 2, 132: 1, 143: 0 } },
+      { at: 1_000, dps: { 123: 51, 127: 0 } }, // leaves the contacts
+      { at: 5_000, dps: { 123: 60 } }, // mow_fault, out on the lawn, and DPS 132 is never cleared
+      { at: REJOIN_GRACE_MS + 9_000, dps: { 121: 99 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.position), ['dock', 'leaving', 'leaving', 'out']);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false, false]);
+  });
+
   test('a departure cancelled out on the lawn is out, not still leaving', () => {
     const states = replayPushes([
       { at: 0, dps: chargingMidJob },
