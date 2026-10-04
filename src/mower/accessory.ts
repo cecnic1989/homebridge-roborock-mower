@@ -163,7 +163,10 @@ export class MowerAccessory {
       if (key === 'attention') {
         this.applyIfChanged(key, state.attention); // never debounced: a fault must reach the phone on the push that reports it
       } else {
-        this.schedule(key, state[key]);
+        // The mower reports being out of the dock, which outranks the contact, so docked here is always false:
+        // the door has to be open before it moves ~1.5s later, and that edge skips the debounce. Everything
+        // else keeps it — including a bare contact flicker on a mower that is going nowhere.
+        this.schedule(key, state[key], key === 'docked' && state.away);
       }
     }
     for (const definition of SWITCH_DEFS) {
@@ -210,30 +213,33 @@ export class MowerAccessory {
   }
 
   // Activity flags must hold for the debounce period before HomeKit sees them; the first value is applied immediately.
-  private schedule(key: string, value: boolean): void {
-    const pending = this.pending.get(key);
+  private schedule(key: string, value: boolean, immediate = false): void {
     if (this.applied.get(key) === value) {
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pending.delete(key);
-      }
+      this.cancelPending(key);
       return;
     }
-    if (pending?.value === value) {
-      return;
-    }
-    if (pending) {
-      clearTimeout(pending.timer);
-    }
-    if (!this.applied.has(key) || this.debounceMs === 0) {
+    if (immediate || !this.applied.has(key) || this.debounceMs === 0) {
+      this.cancelPending(key);
       this.apply(key, value);
       return;
     }
+    if (this.pending.get(key)?.value === value) {
+      return;
+    }
+    this.cancelPending(key); // unreachable today, but replacing an entry must never orphan its timer
     const timer = setTimeout(() => {
       this.pending.delete(key);
       this.apply(key, value);
     }, this.debounceMs);
     this.pending.set(key, { value, timer });
+  }
+
+  private cancelPending(key: string): void {
+    const pending = this.pending.get(key);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(key);
+    }
   }
 
   private applyIfChanged(key: SensorKey, value: boolean): void {
@@ -243,11 +249,18 @@ export class MowerAccessory {
   }
 
   private apply(key: string, value: boolean): void {
+    const initial = !this.applied.has(key);
     this.applied.set(key, value);
     const sensor = this.sensors.get(key as SensorKey);
     if (sensor) {
-      sensor.updateCharacteristic(this.hap.Characteristic.ContactSensorState, contactValue(key as SensorKey, value, this.hap.Characteristic));
-      this.log.debug(`${this.baseName}: ${SENSOR_LABELS[key as SensorKey]} ${value ? 'on' : 'off'}`);
+      const c = this.hap.Characteristic;
+      const contact = contactValue(key as SensorKey, value, c);
+      sensor.updateCharacteristic(c.ContactSensorState, contact);
+      // Worded as the Home app names the trigger, so the log reads as the automation that fired. The first
+      // value of each sensor is marked: it can still fire one, against whatever HomeKit had cached, but it
+      // is not a change the mower made.
+      const edge = contact === c.ContactSensorState.CONTACT_NOT_DETECTED ? 'opens' : 'closes';
+      this.log.info(`${this.baseName}: ${SENSOR_LABELS[key as SensorKey]} ${edge}${initial ? ' (initial)' : ''}`);
       return;
     }
     this.switches.get(key as SwitchKey)?.updateCharacteristic(this.hap.Characteristic.On, value);

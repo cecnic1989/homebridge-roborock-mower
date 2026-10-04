@@ -3,7 +3,7 @@ import type mqtt from 'mqtt';
 
 import { MowerAccessory, type SensorOptions } from './mower/accessory.js';
 import { ACTION_LABELS, isOk, LIVENESS_PROBE, type MowerAction, remotePbParams } from './mower/commands.js';
-import { type DerivedState, type Dps, deriveMowerState, describeAttention, describeMowState } from './mower/state.js';
+import { DPS, type DerivedState, type Dps, deriveMowerState, describeAttention, describeMowState, settleState } from './mower/state.js';
 import { findMowers, type MowerDevice } from './roborock/mower.js';
 import { RequestTimeout, RoborockMqtt } from './roborock/mqtt-client.js';
 import { type PlatformStatus, readSession, type StatusDevice, writeStatus } from './roborock/session-store.js';
@@ -62,6 +62,7 @@ interface TrackedMower {
   probeRestarted: boolean;
   probeDormant: boolean;
   healArmed: boolean; // per mower: a sibling's traffic says nothing about THIS mower's subscription
+  silentSince?: number; // when the run of codes that place the mower nowhere started, bounding what is held
 }
 
 const MIN_POLL_SECONDS = 900; // Roborock rate-limits home data; python-roborock budgets 5/hour.
@@ -69,6 +70,9 @@ const MAX_POLL_SECONDS = 86_400;
 const DEFAULT_POLL_SECONDS = 3600;
 const STARTUP_RETRY_MS = 5 * 60_000;
 const STALE_PUSH_MS = 5 * 60_000; // a push this old no longer outranks a disagreeing cloud snapshot
+// Everything the dock decision rests on. A snapshot that omits any of them cannot contradict us about where
+// the mower is — and since merging it cannot clear a key it never carried, it would say so on every poll.
+const DOCK_EVIDENCE_DPS = [DPS.MOW_STATE, DPS.CHARGE_STATE, DPS.OFF_DOCK_NO_TASK_STATUS];
 // A docked mower is legitimately quiet for hours, but this much silence on a connection that claims to be
 // live is the signature of a silently dropped subscription — the broker drops it without disconnecting.
 const SILENT_PUSH_RESTART_MS = 2 * 3_600_000;
@@ -607,15 +611,27 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
       // dead — that is what a silent broker drop looks like from here.
       const pushAge = tracked.lastPushAt === undefined ? Infinity : this.now() - tracked.lastPushAt;
       if (pushAge > STALE_PUSH_MS) {
-        const snapshotMowState = deriveMowerState(toNumericDps(device.deviceStatus ?? {})).mowState;
-        const pushMowState = tracked.last?.mowState;
-        if (snapshotMowState !== undefined && pushMowState !== undefined && snapshotMowState !== pushMowState
-          && (this.mqtt?.connected ?? false)) {
-          this.log.warn(`${device.name}: no live update for ${Math.round(pushAge / 60_000)} min and the cloud disagrees; `
-            + 'applying the cloud snapshot and reconnecting MQTT.');
+        // Compared as derived state, not raw DPS: where the mower is and what it is doing is what a missed
+        // push would have changed. The charge state on its own is not evidence — it cycles 1-2-3 through a
+        // normal overnight charge, which would reconnect on every poll for nothing.
+        const snapshot = toNumericDps(device.deviceStatus ?? {});
+        const cloud = deriveMowerState(snapshot);
+        // Only once we have heard from the mower ourselves: on the first sync there is nothing to contradict.
+        const live = tracked.last === undefined ? undefined : deriveMowerState(tracked.dps);
+        // Each side has to know the thing being compared, or a DPS the snapshot simply omits reads as a
+        // contradiction and restarts MQTT on every poll — the push-dropping churn this is meant to prevent.
+        const stateDiffers = cloud.mowState !== undefined && live?.mowState !== undefined && cloud.mowState !== live.mowState;
+        const knowsPlace = DOCK_EVIDENCE_DPS.every((key) => snapshot[key] !== undefined);
+        const placeDiffers = live !== undefined && knowsPlace && cloud.docked !== live.docked;
+        const healing = (stateDiffers || placeDiffers) && (this.mqtt?.connected ?? false);
+        if (healing) {
+          this.log.warn(`${device.name}: no live update for ${Math.round(pushAge / 60_000)} min and the cloud `
+            + `disagrees (${describeMowState(cloud.mowState)}${cloud.docked ? ', docked' : ''} vs `
+            + `${describeMowState(live?.mowState)}${live?.docked ? ', docked' : ''}); merging the snapshot `
+            + 'and reconnecting MQTT.');
           staleSubscription = true;
         }
-        this.applyDps(tracked, device.deviceStatus ?? {}, 'cloud');
+        this.applyDps(tracked, device.deviceStatus ?? {}, healing ? 'heal' : 'cloud');
       } else {
         this.log.debug(`${device.name}: cloud snapshot ignored in favour of fresh live state: ${JSON.stringify(device.deviceStatus)}`);
       }
@@ -684,14 +700,26 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     this.log.info(`${name}: ${ACTION_LABELS[action]} command acknowledged`);
   }
 
-  private applyDps(tracked: TrackedMower, update: Record<string | number, unknown>, source: 'push' | 'cloud'): void {
+  private applyDps(tracked: TrackedMower, update: Record<string | number, unknown>, source: 'push' | 'cloud' | 'heal'): void {
+    const contactBefore = tracked.dps[DPS.CHARGE_STATE]; // read before the merge: a changed contact is current
     Object.assign(tracked.dps, toNumericDps(update));
     if (source === 'push') {
       tracked.lastPushAt = this.now();
     }
-    const state = deriveMowerState(tracked.dps);
+    // Only the heal path is taken as read: it has just declared the live state wrong, so nothing may be held
+    // over it. An ordinary snapshot is merged like any other news, and what it settles nothing about stands.
+    const { state, silentSince } = source === 'heal'
+      ? { state: deriveMowerState(tracked.dps), silentSince: undefined }
+      : settleState(tracked.dps, contactBefore, tracked.last, tracked.silentSince, this.now());
+    tracked.silentSince = silentSince;
     if (state.mowState !== tracked.last?.mowState) {
       this.log.info(`${tracked.device.name}: ${describeMowState(state.mowState)} (battery ${state.battery ?? '?'}%)`);
+    }
+    // A charge-contact flap changes no other DPS, so without this the dock decision — which drives the
+    // garage automations — leaves no trace above debug level.
+    if (tracked.last !== undefined && state.docked !== tracked.last.docked) {
+      this.log.info(`${tracked.device.name}: ${state.docked ? 'back on the dock' : 'off the dock'}`
+        + ` (charge state ${tracked.dps[DPS.CHARGE_STATE] ?? '-'}, ${describeMowState(state.mowState)})`);
     }
     if (state.attention && !tracked.last?.attention) {
       this.log.warn(`${tracked.device.name}: needs attention — ${describeAttention(state)}`);

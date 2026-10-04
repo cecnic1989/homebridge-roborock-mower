@@ -33,7 +33,7 @@ Each state is a contact sensor, so Home triggers on it with *A Sensor Detects So
 Two things to know before automating the door:
 
 - **Do not close the door on Mowing.** Mowing opens while the mower is still inside the garage. Leave the door open for the duration of the mow, or close it on a timer.
-- Prefer **Docked opens** over *Leaving opens* to trigger the departure: both fire on the same push, but Docked can only open once per trip. The mower starts moving ~1.5 s later, so if your door is slow, also trigger from the mowing schedule.
+- **Trigger the departure from *Docked opens*, not *Leaving opens*.** Docked opens on the push that starts the mow; Leaving waits out `sensorDebounceSeconds` first, by which time the mower is already moving. If your door is slow, also trigger from the mowing schedule.
 
 **Notifications** need no automation: open the *Needs Attention* sensor in Home → *Status and Notifications* → *Notify when opens*. Pauses made from the Roborock app do not trigger it.
 
@@ -53,7 +53,9 @@ Switches reflect the mower's real state, so a job started in the Roborock app re
 ## Behaviour notes
 
 - Accessories take the mower's name from the Roborock app; names you set in Home are kept.
-- Sensors flip only after a state holds for `sensorDebounceSeconds`. This rides out the brief dock-contact flap when the mower resumes from a mid-job charge, which would otherwise re-trigger dock automations. Faults and battery update immediately.
+- The mower's own report of where it is beats the dock's charge contact. Leaving, mowing or heading home means it is not in the dock, whatever the contact says — it keeps the contacts live while it leaves, re-seats on them when resuming from a mid-job charge, and the push that clears them can go missing. Without this the door would close on the mower.
+- Other sensors flip only after a state holds for `sensorDebounceSeconds`. Faults and battery are immediate, and so is Docked opening whenever the mower reports that it has left the dock — the door has to open before it moves. A change in the dock contact alone still waits out the debounce.
+- Every sensor change is logged as the Home app names it (`Docked opens`, `Returning closes`), alongside the dock decision and the charge state behind it — enough to tell from the log which automation fired and why.
 - Roborock's servers sometimes stop delivering updates without the connection appearing to drop. The plugin detects this and reconnects on its own; sensors show as inactive rather than stale while it does.
 
 ## Requirements

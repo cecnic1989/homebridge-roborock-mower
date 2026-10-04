@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
-import { deriveMowerState, describeAttention, describeMowState } from '../src/mower/state.js';
+import {
+  type DerivedState, IDLE_HOLD_MAX_MS, POSITION_HOLD_MAX_MS, deriveMowerState, describeAttention, describeMowState, settleState,
+} from '../src/mower/state.js';
 
 // Real sequence captured from a RockMow a282 (edge cut started and returned from the app), see fixtures/dps-sequence.json.
 const sequence = JSON.parse(readFileSync(new URL('./fixtures/dps-sequence.json', import.meta.url), 'utf8')) as { dps: Record<string, number> }[];
@@ -111,5 +113,280 @@ describe('deriveMowerState edge cases', () => {
   test('describeMowState names known codes and falls back for unknown ones', () => {
     assert.equal(describeMowState(57), 'mow_goto');
     assert.equal(describeMowState(999), 'unknown(999)');
+  });
+});
+
+// Replays a push sequence as the platform does: merge the delta, then settle it against the last state.
+function replayPushes(steps: { at: number; dps: Record<number, unknown> }[]): DerivedState[] {
+  const dps: Record<number, unknown> = {};
+  let prev: DerivedState | undefined;
+  let silentSince: number | undefined;
+  return steps.map((step) => {
+    const contactBefore = dps[127];
+    Object.assign(dps, step.dps);
+    const settled = settleState(dps, contactBefore, prev, silentSince, step.at);
+    silentSince = settled.silentSince;
+    prev = settled.state;
+    return settled.state;
+  });
+}
+
+// What the mower reports while charging part-way through a job: idle, on the contacts, DPS 132 still set.
+const chargingMidJob = { 121: 85, 123: 0, 127: 1, 132: 1, 143: 0 };
+const mowingMidJob = { 121: 46, 123: 57, 127: 0, 132: 1, 143: 0 };
+
+describe('leaving the dock', () => {
+  // 2026-10-03: resuming from a mid-job charge the mower re-seated on the charge contacts for 10s during the
+  // undock shuffle. DPS 127 went back to "charging", docked closed again, and the garage door shut on it.
+  test('a charge contact re-touch during the undock shuffle never re-docks the mower', () => {
+    const docked = replayPushes([
+      { at: 0, dps: chargingMidJob },
+      { at: 1_000, dps: { 123: 51 } }, // mow_initializing, contacts still live
+      { at: 3_000, dps: { 123: 52 } }, // undocking
+      { at: 4_000, dps: { 123: 0, 127: 1 } }, // re-seats: "charging" again for 10s
+      { at: 14_000, dps: { 123: 51 } },
+      { at: 21_000, dps: { 123: 57, 127: 0 } }, // mow_goto, clear of the contacts
+    ]).map((state) => state.docked);
+    assert.deepEqual(docked, [true, false, false, false, false, false]);
+  });
+
+  test('driving home docks it again on arrival', () => {
+    const states = replayPushes([
+      { at: 0, dps: chargingMidJob },
+      { at: 1_000, dps: { 123: 51 } },
+      { at: 10_000, dps: { 123: 57, 127: 0 } },
+      { at: 20_000, dps: { 123: 61 } }, // rain: heads home with the job still open
+      { at: 30_000, dps: { 123: 76, 127: 1 } }, // on the dock, charging
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false, false, true]);
+    assert.equal(states[3].returning, true, 'a rain return is not mistaken for a departure');
+  });
+
+  test('a start that gives up and idles on the dock reads as docked again, and a retry as a fresh departure', () => {
+    const states = replayPushes([
+      { at: 0, dps: chargingMidJob },
+      { at: 1_000, dps: { 123: 51 } },
+      { at: 5_000, dps: { 123: 0 } }, // gives up and sits on the dock, DPS 132 still set
+      { at: POSITION_HOLD_MAX_MS + 6_000, dps: { 121: 86 } }, // idle too long to still be the exit shuffle
+      { at: POSITION_HOLD_MAX_MS + 7_000, dps: { 123: 51 } }, // tries again, and needs the door open as much
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false, true, false]);
+    assert.deepEqual(states.map((state) => state.leaving), [false, true, true, false, true],
+      'Leaving must not stick open on the dock, or the retry has no rising edge to trigger on');
+  });
+
+  // DPS 127 is the one push known to go missing. If the "contacts clear" push is lost, the contact still
+  // reads charging while the mower cuts grass — and a close-on-Docked automation would lock it out.
+  test('a mower that reports mowing, or heading home, is not docked whatever the contact says', () => {
+    for (const state of [51, 55, 56, 57, 64, 65, 66, 70, 71, 75, 2, 8, 102]) {
+      const docked = deriveMowerState({ 121: 70, 123: state, 127: 1, 132: 1, 143: 0 }).docked;
+      assert.equal(docked, false, `state ${state} with a stale charge contact is still not docked`);
+    }
+  });
+
+  test('a bare idle mid-mow keeps the mower out, even if the charge contact has gone stale', () => {
+    const states = replayPushes([
+      { at: 0, dps: mowingMidJob },
+      { at: 10_000, dps: { 123: 55, 127: 1 } }, // the contacts-clear push was lost: 127 is stale
+      { at: 20_000, dps: { 123: 0 } }, // and now a bare idle, which 127 alone would read as docked
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [false, false, false]);
+    assert.deepEqual(states.map((state) => state.mowing), [true, true, true]);
+  });
+
+  test('a bare idle keeps a return consistent, so nothing downstream reads it as a departure', () => {
+    const states = replayPushes([
+      { at: 0, dps: mowingMidJob },
+      { at: 10_000, dps: { 123: 71 } }, // heading home
+      { at: 20_000, dps: { 123: 0 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.returning), [false, true, true]);
+    assert.deepEqual(states.map((state) => state.homeward), [false, true, true]);
+  });
+
+  // 2026-08-26: a rain return reported 61 while the mower was still outside a closed garage. The contact is
+  // the only thing that tells that from a mower waiting out rain on its dock — so if the push that cleared
+  // the contact was lost, the contact alone would send the door down on it all over again.
+  // Positive evidence always beats what is held: if the undock state code is the push that goes missing,
+  // DPS 143 alone has to open the door, and the mower is moving while it waits.
+  test('a bare idle that reports itself off the dock is off the dock, held position or not', () => {
+    const states = replayPushes([
+      { at: 0, dps: chargingMidJob },
+      { at: 1_000, dps: { 123: 0, 127: 0, 143: 104 } }, // left, with no 51/52 push to announce it
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, false]);
+    assert.equal(states[1].away, true);
+  });
+
+  // A pause or a fault says the mower stopped, not where it stopped. With the contacts-clear push lost, the
+  // contact would answer "on the dock" and shut the door on a mower stopped out on the lawn.
+  test('a pause or fault out on the lawn does not hand the dock decision back to a stale contact', () => {
+    for (const code of [58, 59, 60, 67, 107]) {
+      const states = replayPushes([
+        { at: 0, dps: { 121: 40, 123: 55, 127: 1, 132: 1, 143: 0 } }, // mowing; the contacts-clear push was lost
+        { at: 10_000, dps: { 123: code } },
+      ]);
+      assert.equal(states[1].docked, false, `state ${code} does not dock a mower that was out`);
+    }
+  });
+
+  // Nothing breaks a charge contact without moving, so a lone contact push is the whole story when the push
+  // carrying 51/52 is the one that went missing — and that is the push the garage door waits on.
+  test('a charge contact going clear is believed on its own, with no state code to vouch for it', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 100, 123: 0, 127: 2, 132: 0, 143: 0 } }, // parked on the dock
+      { at: 1_000, dps: { 132: 1 } }, // a mow starts; the 51/52 push never arrives
+      { at: 2_000, dps: { 127: 0 } }, // it rolls off the contacts, and that is all we are told
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, true, false]);
+  });
+
+  // The flicker has to recover on the very next push. Held "nowhere" with no way back, a one-push drop at
+  // 3am would open the garage and leave it open until the hold expired.
+  test('a charge contact that drops for one push is back where it was on the next', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 100, 123: 0, 127: 2, 132: 0, 143: 0 } }, // parked on the dock
+      { at: 1_000, dps: { 127: 0 } }, // one push with the contact dropped out
+      { at: 2_000, dps: { 127: 2 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, true]);
+  });
+
+  // The mirror case: the contact asserting is the doubtful half, but once the mower is out and not mid-exit
+  // it is the only arrival signal this firmware may give.
+  test('a charge contact asserting after a mow is an arrival, not a re-seat', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 40, 123: 55, 127: 0, 132: 1, 143: 0 } }, // mowing
+      { at: 10_000, dps: { 123: 0 } }, // between zones; no return code and no 143 ever arrives
+      { at: 20_000, dps: { 127: 2 } }, // and now it is charging, so it is home
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [false, false, true]);
+    assert.equal(states[2].away, false, 'and it stops claiming to be out');
+  });
+
+  test('a rain return with a stale charge contact is still out on the lawn, and says so', () => {
+    for (const wait of [61, 62, 63]) {
+      const states = replayPushes([
+        { at: 0, dps: { 121: 40, 123: 55, 127: 1, 132: 1, 143: 0 } }, // mowing; the contacts-clear push was lost
+        { at: 10_000, dps: { 123: wait } }, // rain: heads home, with the contact still reading charging
+      ]);
+      assert.equal(states[1].docked, false, `state ${wait} does not dock a mower that was out`);
+      assert.equal(states[1].returning, true, `state ${wait} reports the return instead`);
+    }
+  });
+
+  test('once a code puts it back on the dock, the dock is where it is', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 40, 123: 55, 127: 1, 132: 1, 143: 0 } },
+      { at: 10_000, dps: { 123: 61 } }, // heading home
+      { at: 20_000, dps: { 123: 76 } }, // arrived: charging on the dock
+      { at: 30_000, dps: { 123: 61 } }, // and now genuinely waiting out the rain, docked
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [false, false, true, true]);
+  });
+
+  test('a code that puts it on the dock outranks a DPS 143 that was never cleared', () => {
+    assert.equal(deriveMowerState({ 121: 100, 123: 76, 127: 1, 143: 104 }).docked, true);
+    assert.equal(deriveMowerState({ 121: 100, 123: 152, 127: 2, 143: 104 }).docked, true);
+  });
+
+  // The capture shows the end push ({122,123,132}) landing before DPS 143, so a job can end out on the lawn
+  // with the job flag already cleared. If the contacts-clear push was lost too, 143 is the only truth left.
+  test('off-dock-no-task (143) outranks a stale charge contact, with no job left to vouch for it', () => {
+    const state = deriveMowerState({ 121: 55, 122: 0, 123: 0, 127: 2, 132: 0, 143: 104 });
+    assert.equal(state.docked, false, 'DPS 143 says it is off the dock, whatever the contact reads');
+    assert.equal(state.returning, true, 'and nothing suppresses the sensor that says so');
+  });
+
+  test('a map rebuild leaves the dock like a mow does, though it is not mowing', () => {
+    const states = replayPushes([
+      { at: 0, dps: { 121: 100, 123: 0, 127: 2, 132: 0, 143: 0 } }, // parked, no job
+      { at: 1_000, dps: { 123: 2 } }, // map_undocking, contacts still live
+      { at: 10_000, dps: { 123: 8, 127: 1 } }, // mapping a boundary, and the contacts-clear push was lost
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false]);
+    assert.deepEqual(states.map((state) => state.mowing), [false, false, false]);
+  });
+
+  // An abort says the mower stopped, not where it stopped, so its position is whatever it last was — the
+  // door stays open rather than closing on a mower that faulted halfway out. The contact takes over once
+  // the position hold runs out.
+  test('an abort does not move the mower, so it does not move the door either', () => {
+    const states = replayPushes([
+      { at: 0, dps: chargingMidJob },
+      { at: 1_000, dps: { 123: 51 } },
+      { at: 5_000, dps: { 123: 69 } }, // mow_dock_fault
+      { at: POSITION_HOLD_MAX_MS + 6_000, dps: { 121: 84 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false, true]);
+    assert.equal(states[2].attention, true, 'and it says it needs attention on the push that reports it');
+  });
+
+  test('a remote-control undock counts as leaving, not as mowing', () => {
+    const states = replayPushes([
+      { at: 0, dps: chargingMidJob },
+      { at: 1_000, dps: { 123: 70 } }, // mow_remote_undocking, contacts still live
+      { at: 4_000, dps: { 123: 0, 127: 1 } }, // re-seats: "charging" again
+      { at: 14_000, dps: { 123: 66, 127: 0 } }, // out, under remote control
+    ]);
+    assert.deepEqual(states.map((state) => state.docked), [true, false, false, false]);
+    assert.deepEqual(states.map((state) => state.leaving), [false, true, true, false]);
+  });
+});
+
+// The captured sequence is the real device start-to-finish, and it ends with the mower reaching its dock on
+// {127: 2, 143: 0} with 123 still idle — no docked state code anywhere. Derivation alone gets this right; it
+// is `settleState`, the layer the platform actually pushes through, that has to agree.
+describe('settleState over the captured sequence', () => {
+  test('the mower is docked at the start and docked again at the end', () => {
+    const states = replayPushes([
+      { at: 0, dps: seed },
+      ...sequence.map((step, index) => ({
+        at: 1_000 + index * 1_000,
+        dps: Object.fromEntries(Object.entries(step.dps).map(([k, v]) => [Number(k), v])),
+      })),
+    ]);
+    assert.equal(states[0].docked, true, 'idle on the dock, charge complete');
+    assert.equal(states.at(-1)?.docked, true, 'and home again — or the garage door never closes');
+    assert.equal(states.at(-1)?.returning, false);
+  });
+
+  test('the departure in the middle is never read as a return to the dock', () => {
+    const states = replayPushes([
+      { at: 0, dps: seed },
+      ...sequence.slice(0, 4).map((step, index) => ({
+        at: 1_000 + index * 1_000,
+        dps: Object.fromEntries(Object.entries(step.dps).map(([k, v]) => [Number(k), v])),
+      })),
+    ]);
+    assert.deepEqual(states.slice(1).map((state) => state.docked), [true, false, false, false]);
+  });
+});
+
+describe('a bare idle mid-job', () => {
+  test('keeps the previous activity: the mower sits at 0 for up to half a minute between zones', () => {
+    const states = replayPushes([
+      { at: 0, dps: mowingMidJob },
+      { at: 10_000, dps: { 123: 0 } }, // 33s of idle, as observed on 2026-10-03
+      { at: 43_000, dps: { 123: 55 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.mowing), [true, true, true]);
+  });
+
+  test('does not outlive the job: idle on the end push is no longer mowing', () => {
+    const states = replayPushes([
+      { at: 0, dps: mowingMidJob },
+      { at: 10_000, dps: { 122: 0, 123: 0, 132: 0 } }, // task ended
+    ]);
+    assert.deepEqual(states.map((state) => state.mowing), [true, false]);
+  });
+
+  test('does not outlive its bound: a job-end push that loses DPS 132 still stops reading as mowing', () => {
+    const states = replayPushes([
+      { at: 0, dps: mowingMidJob },
+      { at: 10_000, dps: { 123: 0 } }, // the 132 -> 0 half of the end push never arrived
+      { at: IDLE_HOLD_MAX_MS + 11_000, dps: { 121: 45 } },
+    ]);
+    assert.deepEqual(states.map((state) => state.mowing), [true, true, false]);
   });
 });

@@ -30,14 +30,24 @@ export const MOW_STATE_NAMES: Record<number, string> = {
   151: 'charge_charging', 152: 'charge_completed', 153: 'charge_waiting', 154: 'charge_fault',
 };
 
-const LEAVING_STATES = new Set([51, 52, 53, 54]);
-const MOWING_STATES = new Set([55, 56, 57, 64, 65, 66, 70]);
+// 70 is mow_remote_undocking: leaving the dock under remote control is still leaving the dock.
+const LEAVING_STATES = new Set([51, 52, 53, 54, 70]);
+const MOWING_STATES = new Set([55, 56, 57, 64, 65, 66]);
 const RETURNING_STATES = new Set([71, 72, 73, 74, 75]);
 // Bare idle (0) is deliberately not here: the mower reports 0 off the dock between a task ending and 143 being set.
 const DOCKED_STATES = new Set([68, 76, 77, 104, 105, 106, 151, 152, 153]);
 // Rain/DND/low-battery waits (61-63): reported as soon as the mower decides to head home, before it is
 // physically back on the dock — only charge contact proves it arrived. Off the dock they mean "returning".
 const DOCK_WAIT_STATES = new Set([61, 62, 63]);
+// Building a map or roaming free puts the mower on the lawn just as definitely as mowing does, though it is
+// not mowing. Deliberately excluded: map_erasing/map_save/map_wait and every fault, which can all be reported
+// on the dock.
+const AWAY_STATES = new Set([1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 101, 102, 103]);
+// Leaving, working, mapping, heading home: all of them place the mower away from its dock whatever the charge
+// contact says. They have to win, because the contact re-asserts while the mower leaves and the push that
+// clears it is the one known to go missing. Every other code — a bare idle, a pause, a fault, the 61-63
+// waits, a map being saved — says nothing about position, so there the contact decides and nothing else can.
+const OFF_DOCK_STATES = new Set([...LEAVING_STATES, ...MOWING_STATES, ...RETURNING_STATES, ...AWAY_STATES]);
 const CHARGING_STATES = new Set([76, 151]);
 const PAUSED_STATES = new Set([17, 58, 67, 75, 107]);
 const FAULT_STATES = new Set([3, 15, 16, 59, 60, 69, 73, 74, 108, 109, 154]);
@@ -51,6 +61,8 @@ export interface DerivedState {
   leaving: boolean;
   mowing: boolean;
   returning: boolean;
+  homeward: boolean;
+  away: boolean; // the mower's own report that it is out of the dock, which outranks the charge contact
   charging: boolean;
   paused: boolean;
   fault: boolean;
@@ -77,13 +89,19 @@ export function deriveMowerState(dps: Dps): DerivedState {
   const errorCode = num(dps[DPS.ERROR_CODE]) ?? 0;
   const state = mowState ?? -1;
 
-  const docked = (chargeState !== undefined && CHARGE_STATE_ON_DOCK.has(chargeState)) || DOCKED_STATES.has(state);
+  // DPS 143 ("off dock, no task") is the most literal report of all, and `returning` below already trusts it
+  // — but a code that puts the mower on the dock is newer news than a 143 whose clearing push went missing.
+  const away = OFF_DOCK_STATES.has(state) || (offDock !== 0 && !DOCKED_STATES.has(state));
+  const docked = !away && ((chargeState !== undefined && CHARGE_STATE_ON_DOCK.has(chargeState)) || DOCKED_STATES.has(state));
   const fault = errorCode !== 0 || FAULT_STATES.has(state);
+  const homeward = RETURNING_STATES.has(state) || DOCK_WAIT_STATES.has(state);
   return {
     docked,
     leaving: LEAVING_STATES.has(state),
     mowing: MOWING_STATES.has(state),
-    returning: !docked && (RETURNING_STATES.has(state) || DOCK_WAIT_STATES.has(state) || offDock !== 0),
+    returning: !docked && (homeward || offDock !== 0),
+    homeward,
+    away,
     charging: chargeState === 1 || CHARGING_STATES.has(state),
     paused: PAUSED_STATES.has(state),
     fault,
@@ -95,6 +113,56 @@ export function deriveMowerState(dps: Dps): DerivedState {
     mowState,
     errorCode,
   };
+}
+
+// How long the activity flags may be carried over a bare idle: generous next to the half-minute the mower
+// spends between zones, short enough that a job whose end push lost its DPS 132 stops reading as mowing.
+export const IDLE_HOLD_MAX_MS = 2 * 60_000;
+// How long the last known position may be carried over codes that place the mower nowhere. Longer, because
+// the only alternative is the charge contact, and a lost clearing push makes it report "home" while the mower
+// is still driving there — comfortably past a real return, which took 74s in the 2026-10-03 capture.
+export const POSITION_HOLD_MAX_MS = 10 * 60_000;
+
+export interface Settled {
+  state: DerivedState;
+  silentSince: number | undefined;
+}
+
+// Most state codes say where the mower is; some say nothing about it at all — a bare idle, a pause, a fault,
+// the 61-63 rain/DND waits. For those the charge contact is the only thing left, and it lies exactly when it
+// matters: the push that clears it is the one known to go missing, and until it arrives the contact reports
+// the mower home while it is still out. That closed a garage door on a returning mower once (2026-08-26) and
+// on a departing one twice (2026-08-29, 2026-10-03). So a code that settles nothing carries what came before
+// it, bounded, and anything positive — a code that places the mower, or DPS 143 — takes over at once.
+export function settleState(
+  dps: Dps, contactBefore: unknown, prev: DerivedState | undefined, silentSince: number | undefined, now: number,
+): Settled {
+  const state = deriveMowerState(dps);
+  const code = state.mowState ?? -1;
+  if (prev === undefined || state.away || DOCKED_STATES.has(code)) {
+    return { state, silentSince: undefined };
+  }
+  const since = silentSince ?? now;
+  const held = { ...state };
+  if (now - since <= POSITION_HOLD_MAX_MS) {
+    // The charge contact is physically honest when it is current — nothing breaks one without moving, and
+    // nothing asserts one without touching it. The catch is that it may not be current: if a state code has
+    // already placed the mower away while the contact still reads on-dock, the push that cleared it never
+    // arrived. So an asserting contact means "home" only when this push changed it, or when it was already
+    // what we believed, and only when the mower was not in the middle of leaving — on the way out it
+    // re-seats on those same contacts. A contact gone clear needs none of that and is simply believed.
+    held.docked = state.docked && !prev.leaving && (dps[DPS.CHARGE_STATE] !== contactBefore || prev.docked);
+    held.away = !held.docked && prev.away;
+    held.homeward = state.homeward || prev.homeward; // 61-63 announce the intent; a bare idle keeps it
+    held.returning = !held.docked && held.homeward;
+  }
+  // A bare idle reports no activity either, and the mower sits at one for up to half a minute between zones.
+  if (state.jobActive && code === 0 && now - since <= IDLE_HOLD_MAX_MS) {
+    held.leaving = prev.leaving;
+    held.mowing = prev.mowing;
+    held.returning = prev.returning;
+  }
+  return { state: held, silentSince: since };
 }
 
 export function describeMowState(code: number | undefined): string {

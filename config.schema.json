@@ -70,7 +70,7 @@
         "default": 15,
         "minimum": 0,
         "maximum": 60,
-        "description": "How long a state must hold before its sensor flips. Faults and battery are reported immediately. The default absorbs the brief dock-contact flap when the mower resumes from a mid-job charge, which would otherwise re-trigger dock automations."
+        "description": "How long a state must hold before its sensor flips, so brief flickers do not reach your automations. Faults and battery are reported immediately, and so is Docked opening whenever the mower reports that it has left the dock. Raising this will not fix a dock automation: the plugin already ignores the dock contact whenever the mower reports that it is away."
       }
     }
   },

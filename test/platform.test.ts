@@ -80,7 +80,7 @@ function start(options: StartOptions = {}) {
     clock.now += advanceMs;
     await platform.reconcile();
   };
-  return { platform, accessories, calls, client, storagePath, resync, stored, clock };
+  return { platform, accessories, calls, client, storagePath, resync, stored, clock, emit };
 }
 
 const connect = (client: FakeMqttClient) => {
@@ -272,6 +272,134 @@ describe('RoborockMowerPlatform re-sync', () => {
     assert.deepEqual(client.subscriptions, [TOPIC]);
     await resync();
     assert.deepEqual(client.subscriptions, [TOPIC, TOPIC]);
+  });
+
+  // Watching only the state code missed this: with an idle mower the dock decision rests on the charge
+  // contact, so the cloud can think it is home while the live state has it out, with 123 agreeing throughout.
+  test('a snapshot that agrees on the state code but puts the mower somewhere else heals the subscription', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const stale = {
+      success: true,
+      result: { ...home, devices: [{ ...home.devices[0], deviceStatus: { ...home.devices[0].deviceStatus, 123: 0, 127: 1 } }] },
+    };
+    const { platform, resync } = start({ session, connectMqtt: connectMqtt as never, homeResponse: () => stale });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":0,"127":0,"143":104}'); // idle out on the lawn... then an hour of silence
+    await resync();
+    assert.equal(clients.length, 2, 'the cloud has it on the dock and we do not: the subscription is presumed dead');
+  });
+
+  // A device whose snapshot omits the DPS we compare is not disagreeing with us, and since the snapshot
+  // merges nothing it would look the same on every poll: a restart an hour, forever, on a healthy link.
+  test('a snapshot with no status at all is not a disagreement', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const bare = { success: true, result: { ...home, devices: [{ ...home.devices[0], deviceStatus: {} }] } };
+    let response: object = { success: true, result: home };
+    const { platform, resync } = start({ session, connectMqtt: connectMqtt as never, homeResponse: () => response });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":0,"127":2}'); // docked and quiet, as a mower is for most of the day
+    response = bare;
+    await resync();
+    await resync();
+    assert.equal(clients.length, 1, 'nothing was contradicted, so nothing was presumed dead');
+  });
+
+  // cloud.docked rests on three DPS, and merging a snapshot cannot clear a key it never carried — so a
+  // snapshot missing one of them would read as the same disagreement on every poll, forever.
+  test('a snapshot missing one of the keys the dock decision rests on is not a disagreement', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const partial = {
+      success: true,
+      result: { ...home, devices: [{ ...home.devices[0], deviceStatus: { 121: 90, 123: 0, 127: 1 } }] }, // no 143
+    };
+    let response: object = { success: true, result: home };
+    const { platform, resync } = start({ session, connectMqtt: connectMqtt as never, homeResponse: () => response });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":0,"127":1,"143":104}'); // idle off the dock, then quiet
+    response = partial;
+    await resync();
+    await resync();
+    assert.equal(clients.length, 1, 'the snapshot never said where the mower was, so it contradicted nothing');
+  });
+
+  // `update` on the cloud path is the whole deviceStatus, so testing for a key's presence rather than a
+  // changed value made every poll look like fresh dock evidence, tearing down a hold that was correct.
+  test('a snapshot that repeats what we already knew does not count as the mower arriving', async () => {
+    const paused = {
+      success: true,
+      result: { ...home, devices: [{ ...home.devices[0], deviceStatus: { 121: 30, 123: 58, 127: 1, 132: 1, 143: 0 } }] },
+    };
+    let response: object = { success: true, result: home };
+    const { platform, accessories, client, resync } = start({
+      session, config: { sensorDebounceSeconds: 0 }, homeResponse: () => response,
+    });
+    await platform.whenStarted();
+    connect(client);
+    const docked = () => accessories[0].find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState');
+    push(client, '{"121":32,"123":55,"127":1,"132":1}'); // mowing, with the contacts-clear push lost
+    push(client, '{"123":58}'); // paused out on the lawn, so the stale contact is held off
+    assert.equal(docked(), 1);
+    response = paused;
+    await resync(6 * 60_000); // the snapshot says exactly what we already had
+    assert.equal(docked(), 1, 'nothing changed, so nothing arrived');
+  });
+
+  // DPS 127 cycles 1-2-3 as the pack tops off, and a docked mower is legitimately quiet for hours, so the
+  // charge state on its own is not evidence of anything: treating it as such reconnects all night for nothing.
+  test('a charge state that moved while the mower sat on its dock is not a dead subscription', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const topped = {
+      success: true,
+      result: { ...home, devices: [{ ...home.devices[0], deviceStatus: { ...home.devices[0].deviceStatus, 123: 0, 127: 2 } }] },
+    };
+    const { platform, resync } = start({ session, connectMqtt: connectMqtt as never, homeResponse: () => topped });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":0,"127":1}'); // charging on the dock, and then quiet overnight
+    await resync();
+    assert.equal(clients.length, 1, 'still docked on both sides: nothing was missed');
+  });
+
+  test('a snapshot that stringifies a value it agrees on is not a disagreement, so MQTT is left alone', async () => {
+    const clients: FakeMqttClient[] = [];
+    const connectMqtt = () => {
+      const c = new FakeMqttClient();
+      clients.push(c);
+      return c;
+    };
+    const stringy = {
+      success: true,
+      result: { ...home, devices: [{ ...home.devices[0], deviceStatus: { ...home.devices[0].deviceStatus, 123: 55, 127: '0' } }] },
+    };
+    const { platform, resync } = start({ session, connectMqtt: connectMqtt as never, homeResponse: () => stringy });
+    await platform.whenStarted();
+    connect(clients[0]);
+    push(clients[0], '{"123":55,"127":0,"132":1}');
+    await resync();
+    assert.equal(clients.length, 1, 'reconnecting every poll would drop the very pushes it is meant to restore');
   });
 
   test('a dead subscription is healed: after an hour of silence a disagreeing snapshot wins and MQTT reconnects', async () => {
@@ -966,6 +1094,39 @@ describe('RoborockMowerPlatform live updates', () => {
     push(client, '{"123":51,"127":0}');
     assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'leaving')?.value('ContactSensorState'), 1);
     assert.equal(accessories[0].find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState'), 1);
+  });
+
+  // 2026-10-03: the mower resumed from a mid-job charge, re-seated on the charge contacts for 10s, and the
+  // "Docked closes" automation shut the garage door on it. The door must open once and stay open.
+  test('a charge contact re-touch while it leaves the dock never closes Docked again', async () => {
+    const { platform, accessories, client } = start({ session });
+    await platform.whenStarted();
+    connect(client);
+    const docked = () => accessories[0].find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState');
+    push(client, '{"121":85,"123":0,"127":1,"132":1}'); // charging mid-job: docked
+    assert.equal(docked(), 0);
+    push(client, '{"123":51}'); // starts up, charge contacts still live
+    assert.equal(docked(), 1, 'the door has to open when it starts up, not once it is already rolling out');
+    push(client, '{"123":52}');
+    push(client, '{"123":0,"127":1}'); // re-seats, reports "charging" again
+    push(client, '{"123":51}');
+    push(client, '{"123":57,"127":0}'); // out and mowing
+    const edges = accessories[0].updates.filter((u) => u.service === 'docked' && u.characteristic === 'ContactSensorState');
+    assert.deepEqual(edges.map((u) => u.value), [0, 1], 'closes while charging, opens once — and never closes mid-exit');
+  });
+
+  // The latch opens Docked on the mow-start push, but the debounce would still hold that edge back — and the
+  // mower starts moving ~1.5s later, so a door waiting out the debounce opens into a departing mower.
+  test('Docked opens on the push that starts the mow, even with the debounce configured', async () => {
+    const { platform, accessories, client, emit } = start({ session, config: { sensorDebounceSeconds: 15 } });
+    await platform.whenStarted();
+    connect(client);
+    const docked = () => accessories[0].find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState');
+    push(client, '{"121":85,"123":0,"127":1,"132":1}'); // charging mid-job
+    assert.equal(docked(), 0);
+    push(client, '{"123":51}');
+    assert.equal(docked(), 1, 'the door trigger cannot wait out the debounce');
+    emit('shutdown'); // the Leaving flip is still pending on a 15s timer
   });
 
   test('losing the broker marks sensors inactive; reconnecting restores them without a cloud call', async () => {

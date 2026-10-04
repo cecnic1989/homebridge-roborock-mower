@@ -14,7 +14,8 @@ const allOn: SensorOptions = {
 
 function state(overrides: Partial<DerivedState> = {}): DerivedState {
   return {
-    docked: true, leaving: false, mowing: false, returning: false, charging: false, paused: false, fault: false, attention: false,
+    docked: true, leaving: false, mowing: false, returning: false, homeward: false, away: false,
+    charging: false, paused: false, fault: false, attention: false,
     jobActive: false, battery: 100, lowBattery: false, mowState: 0, errorCode: 0, ...overrides,
   };
 }
@@ -76,12 +77,59 @@ describe('MowerAccessory state pushes', () => {
     const { mower, updates } = build();
     mower.update(state());
     mock.timers.tick(3000);
-    const before = updates.filter((u) => u.service === 'docked').length;
-    mower.update(state({ docked: false }));
+    const before = updates.filter((u) => u.service === 'mowing').length;
+    mower.update(state({ mowing: true }));
     mock.timers.tick(1000);
-    mower.update(state({ docked: true }));
+    mower.update(state({ mowing: false }));
     mock.timers.tick(5000);
-    assert.equal(updates.filter((u) => u.service === 'docked').length, before);
+    assert.equal(updates.filter((u) => u.service === 'mowing').length, before);
+    mock.timers.reset();
+  });
+
+  // Docked drives a garage door, so the two edges are not symmetric: opening it lets the mower out and
+  // cannot wait, while a late close is harmless and the delay absorbs a contact flap as the mower arrives.
+  test('a departure opens docked at once, but the close still waits out the debounce', () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { mower, find } = build();
+    const docked = () => find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState');
+    mower.update(state({ jobActive: true }));
+    mock.timers.tick(3000);
+    mower.update(state({ docked: false, leaving: true, away: true, jobActive: true }));
+    assert.equal(docked(), 1, 'opens on the push: the mower is moving ~1.5s later');
+    mower.update(state({ jobActive: true }));
+    assert.equal(docked(), 1, 'still open: the close waits out the debounce');
+    mock.timers.tick(3000);
+    assert.equal(docked(), 0);
+    mock.timers.reset();
+  });
+
+  // A mower stopped on the dock mid-job — rain-waiting, paused, or reporting a dock fault — has a job open
+  // but is not going anywhere, so a contact flicker there must not reach the door.
+  test('a charge-contact flicker mid-job, with nothing leaving, is still absorbed', () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { mower, find } = build();
+    const docked = () => find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState');
+    mower.update(state({ jobActive: true, attention: true, fault: true })); // mow_dock_fault, seated
+    mock.timers.tick(3000);
+    mower.update(state({ docked: false, jobActive: true, attention: true, fault: true })); // DPS 127 drops out
+    assert.equal(docked(), 0, 'the garage stays shut: the mower never left the dock');
+    mower.update(state({ jobActive: true, attention: true, fault: true }));
+    mock.timers.tick(3000);
+    assert.equal(docked(), 0);
+    mock.timers.reset();
+  });
+
+  test('a charge-contact flicker on a parked mower is still absorbed', () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { mower, find } = build();
+    const docked = () => find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState');
+    mower.update(state());
+    mock.timers.tick(3000);
+    mower.update(state({ docked: false })); // DPS 127 drops out for one push at 3am
+    assert.equal(docked(), 0, 'no job is running, so nothing is leaving and the garage stays shut');
+    mower.update(state());
+    mock.timers.tick(3000);
+    assert.equal(docked(), 0);
     mock.timers.reset();
   });
 
@@ -196,7 +244,7 @@ describe('MowerAccessory naming', () => {
     const { mower, updates } = build();
     mower.update(state());
     const before = updates.length;
-    mower.update(state({ docked: false }));
+    mower.update(state({ mowing: true }));
     mower.dispose();
     mock.timers.tick(10_000);
     assert.equal(updates.length, before);
