@@ -163,10 +163,9 @@ export class MowerAccessory {
       if (key === 'attention') {
         this.applyIfChanged(key, state.attention); // never debounced: a fault must reach the phone on the push that reports it
       } else {
-        // The mower reports being out of the dock, which outranks the contact, so docked here is always false:
-        // the door has to be open before it moves ~1.5s later, and that edge skips the debounce. Everything
-        // else keeps it — including a bare contact flicker on a mower that is going nowhere.
-        this.schedule(key, state[key], key === 'docked' && state.away);
+        // The mower itself reports being out of its dock, so the door has to be open before it moves ~1.5s
+        // later and that edge skips the debounce. Everything else keeps it, a bare contact flicker included.
+        this.schedule(key, state[key], key === 'docked' && state.reported && !state.docked);
       }
     }
     for (const definition of SWITCH_DEFS) {

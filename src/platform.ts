@@ -515,7 +515,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     const tracked: TrackedMower = {
       device, online: true, platformAccessory, accessory, dps: {},
       probeFailures: 0, probeRestarted: false, probeDormant: false, healArmed: true,
-      since: { position: undefined, idle: undefined },
+      since: { position: this.now(), idle: undefined },
       // The connect transition may already have passed (fresh install: the broker connects before the
       // startup cloud sync tracks the mower); seed the clock now so the passive check covers it.
       lastAliveAt: this.mqtt?.connected ? this.now() : undefined,
@@ -704,6 +704,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
   private applyDps(tracked: TrackedMower, update: Record<string | number, unknown>, source: 'push' | 'cloud' | 'heal'): void {
     const contactBefore = tracked.dps[DPS.CHARGE_STATE]; // read before the merge: a changed contact is current
     Object.assign(tracked.dps, toNumericDps(update));
+    const contactChanged = tracked.dps[DPS.CHARGE_STATE] !== contactBefore;
     if (source === 'push') {
       tracked.lastPushAt = this.now();
     }
@@ -711,7 +712,7 @@ export class RoborockMowerPlatform implements DynamicPlatformPlugin {
     // over it. An ordinary snapshot is merged like any other news, and what it settles nothing about stands.
     const { state, since } = source === 'heal'
       ? { state: deriveMowerState(tracked.dps), since: { position: this.now(), idle: undefined } }
-      : settleState(tracked.dps, contactBefore, tracked.last, tracked.since, this.now());
+      : settleState(tracked.dps, contactChanged, tracked.last, tracked.since, this.now());
     tracked.since = since;
     if (state.mowState !== tracked.last?.mowState) {
       this.log.info(`${tracked.device.name}: ${describeMowState(state.mowState)} (battery ${state.battery ?? '?'}%)`);

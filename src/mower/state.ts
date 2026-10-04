@@ -51,17 +51,16 @@ const EMERGENCY_STOP_STATES = new Set([17, 67, 75, 107]);
 const CHARGE_STATE_ON_DOCK = new Set([1, 2, 3]); // charging, completed, waiting
 const LOW_BATTERY_PERCENT = 20;
 
-// Where the mower is, as one fact rather than a handful of booleans that have to be kept consistent.
+// Where the mower is. One fact, so the flags read off it below cannot contradict each other.
 export type Position = 'dock' | 'leaving' | 'out' | 'returning';
 
 export interface DerivedState {
   position: Position;
-  reported: boolean; // whether the mower said where it is, or the charge contact had to answer for it
+  reported: boolean; // the mower said where it is, rather than the charge contact having to answer for it
   docked: boolean;
   leaving: boolean;
   mowing: boolean;
   returning: boolean;
-  away: boolean; // the mower's own report that it is out of the dock, which outranks the charge contact
   charging: boolean;
   paused: boolean;
   fault: boolean;
@@ -80,6 +79,11 @@ function num(value: unknown): number | undefined {
   return value === undefined || value === null || Number.isNaN(n) ? undefined : n;
 }
 
+function isOnContact(dps: Dps): boolean {
+  const chargeState = num(dps[DPS.CHARGE_STATE]);
+  return chargeState !== undefined && CHARGE_STATE_ON_DOCK.has(chargeState);
+}
+
 // Where a state code places the mower. Codes missing from here say nothing about position — a bare idle, a
 // pause, a fault, a map being saved — and leave the question to DPS 143 and the charge contact.
 function codePosition(code: number): Position | undefined {
@@ -95,6 +99,20 @@ function codePosition(code: number): Position | undefined {
   return DOCKED_STATES.has(code) ? 'dock' : undefined;
 }
 
+// What the evidence says, strongest first: a code that places the mower, then the 61-63 waits (reported both
+// on the way home and while waiting it out on the dock, so the contact says which), then DPS 143. Undefined
+// when only the charge contact is left — the one reading that may be stale.
+function positionFromEvidence(code: number, onContact: boolean, offDock: boolean): Position | undefined {
+  const fromCode = codePosition(code);
+  if (fromCode !== undefined) {
+    return fromCode;
+  }
+  if (DOCK_WAIT_STATES.has(code)) {
+    return onContact ? 'dock' : 'returning';
+  }
+  return offDock ? 'returning' : undefined;
+}
+
 export function deriveMowerState(dps: Dps): DerivedState {
   const mowState = num(dps[DPS.MOW_STATE]);
   const chargeState = num(dps[DPS.CHARGE_STATE]);
@@ -103,28 +121,19 @@ export function deriveMowerState(dps: Dps): DerivedState {
   const errorCode = num(dps[DPS.ERROR_CODE]) ?? 0;
   const state = mowState ?? -1;
 
-  const onContact = chargeState !== undefined && CHARGE_STATE_ON_DOCK.has(chargeState);
-  const waiting = DOCK_WAIT_STATES.has(state); // 61-63: interrupted, and belongs at the dock — but is it there yet?
-  const fromCode = codePosition(state);
-  // Best guess without any history: what the code says, then DPS 143, then the contact. `settleState` is
-  // where memory gets a say; this has to stand on its own for the settings page and the cloud comparison.
-  const position = fromCode
-    ?? (waiting ? (onContact ? 'dock' : 'returning') : undefined)
-    ?? (offDock !== 0 ? 'returning' : undefined)
-    ?? (onContact ? 'dock' : 'out');
+  const onContact = isOnContact(dps);
+  const evidence = positionFromEvidence(state, onContact, offDock !== 0);
+  // Stands on its own, with no history: the settings page and the cloud comparison both need that.
+  const position = evidence ?? (onContact ? 'dock' : 'out');
   const docked = position === 'dock';
-  const reported = fromCode !== undefined || waiting || offDock !== 0;
   const fault = errorCode !== 0 || FAULT_STATES.has(state);
   return {
     position,
-    reported,
+    reported: evidence !== undefined,
     docked,
     leaving: position === 'leaving',
     mowing: MOWING_STATES.has(state),
     returning: position === 'returning',
-    // The door-opening trigger, so it takes the mower's own word for it: a bare contact flicker is only a
-    // flicker, and the debounce is there to absorb it.
-    away: reported && !docked,
     charging: chargeState === 1 || CHARGING_STATES.has(state),
     paused: PAUSED_STATES.has(state),
     fault,
@@ -138,13 +147,17 @@ export function deriveMowerState(dps: Dps): DerivedState {
   };
 }
 
-// How long the activity flags may be carried over a bare idle: generous next to the half-minute the mower
-// spends between zones, short enough that a job whose end push lost its DPS 132 stops reading as mowing.
+// How long an asserting charge contact is read as the mower re-seating on its way out rather than settling
+// back down. The observed re-seats ran 10-13s; past this a mower still on the contacts never left.
+export const REJOIN_GRACE_MS = 60_000;
+
+// How long `mowing` is carried over a bare idle: generous next to the half-minute the mower spends between
+// zones, short enough that a job whose end push lost its DPS 132 stops reading as mowing.
 export const IDLE_HOLD_MAX_MS = 2 * 60_000;
 
 // When the mower entered its current position, and when the current run of bare-idle pushes began.
 export interface Since {
-  position: number | undefined;
+  position: number;
   idle: number | undefined;
 }
 
@@ -153,72 +166,53 @@ export interface Settled {
   since: Since;
 }
 
-// How long an asserting charge contact is read as the mower re-seating on its way out rather than settling
-// back down. The observed re-seats ran 10-13s; past this a mower still on the contacts never left.
-export const REJOIN_GRACE_MS = 60_000;
-
 interface Contact {
   on: boolean;
-  changed: boolean; // a contact that just changed is current, and current is what makes it worth believing
+  changed: boolean;
 }
 
-// Where the mower goes next. Evidence first, in order of how directly it answers the question; if nothing in
-// this push answers it, the mower is still where it was. A position is never left on a timer alone, with one
-// exception, noted below, where the mower's last known position was the dock anyway.
+// Where the mower goes next. If nothing in this push answers the question, it is where it was.
 function nextPosition(state: DerivedState, prev: DerivedState, contact: Contact, enteredFor: number): Position {
   const code = state.mowState ?? -1;
   const fromCode = codePosition(code);
   if (fromCode !== undefined) {
     return fromCode;
   }
-  // 61-63 are reported from the moment the mower decides to head home and for as long as it then waits on
-  // the dock, so they say nothing about position by themselves. A current contact settles which it is; a
-  // stale one would claim a mower still on the lawn was home, so without one the mower stays where it was.
+  // A changed reading is a current one, and a departure sitting on the contacts longer than re-seating could
+  // explain never left. A contact that is neither says nothing: its clearing push may simply be missing.
+  const reSeating = prev.position === 'leaving' && enteredFor <= REJOIN_GRACE_MS;
+  const current = contact.changed || (prev.position === 'leaving' && !reSeating);
   if (DOCK_WAIT_STATES.has(code)) {
     if (contact.changed) {
       return contact.on ? 'dock' : 'returning';
     }
     return prev.position === 'dock' ? 'dock' : 'returning';
   }
-  if (contact.changed) {
-    if (!contact.on) {
-      return prev.position === 'dock' ? 'out' : prev.position; // nothing breaks a contact without moving
-    }
-    return prev.position === 'leaving' && enteredFor <= REJOIN_GRACE_MS ? 'leaving' : 'dock';
-  }
-  // A departure that is still on the contacts this long after starting never left — and unlike a mower that
-  // is out, its last known position *is* the dock, so believing the contact here cannot shut it out.
-  if (prev.position === 'leaving' && contact.on && enteredFor > REJOIN_GRACE_MS) {
+  if (contact.on && current && !reSeating) {
     return 'dock';
   }
-  // Nothing current. DPS 143 still reports it away, and a job ending under a stalled departure settles it.
-  if (state.reported) {
-    return prev.position === 'dock' ? 'returning' : prev.position;
+  if (!contact.on && contact.changed) {
+    return prev.position === 'dock' ? 'out' : prev.position; // nothing breaks a contact without moving
   }
-  if (prev.position === 'leaving' && !state.jobActive) {
+  if (state.reported) {
+    return prev.position === 'dock' ? 'returning' : prev.position; // only DPS 143 is left by here
+  }
+  // A job *ending* under a departure that never became a mow settles an otherwise stalled one. It has to be
+  // the transition: a remote-control undock never has a job flag, and must keep its re-seat window.
+  if (prev.position === 'leaving' && prev.jobActive && !state.jobActive) {
     return contact.on ? 'dock' : 'out';
   }
   return prev.position;
 }
 
-// Memory, in the one place that needs it. Position is a state machine over the pushes, so a charge contact
-// that lies about having the mower home cannot move it — which closed a garage door on a returning mower
-// once (2026-08-26) and on a departing one twice (2026-08-29, 2026-10-03). The activity flags need a little
-// of the same: DPS 123 = 0 reports nothing at all, yet the mower sits there for up to half a minute between
-// zones, and taken at face value that dropped Mowing and brought it straight back.
-export function settleState(
-  dps: Dps, contactBefore: unknown, prev: DerivedState | undefined, since: Since, now: number,
-): Settled {
+// Applies `nextPosition`, then carries `mowing` over a bare idle, which reports no activity at all.
+export function settleState(dps: Dps, contactChanged: boolean, prev: DerivedState | undefined, since: Since, now: number): Settled {
   const state = deriveMowerState(dps);
   if (prev === undefined) {
     return { state, since: { position: now, idle: undefined } };
   }
-  const charge = dps[DPS.CHARGE_STATE];
-  const contact: Contact = {
-    on: CHARGE_STATE_ON_DOCK.has(num(charge) ?? -1),
-    changed: charge !== contactBefore,
-  };
-  const position = nextPosition(state, prev, contact, now - (since.position ?? now));
+  const contact: Contact = { on: isOnContact(dps), changed: contactChanged };
+  const position = nextPosition(state, prev, contact, now - since.position);
   const docked = position === 'dock';
   const settled: DerivedState = {
     ...state,
@@ -226,17 +220,12 @@ export function settleState(
     docked,
     leaving: position === 'leaving',
     returning: position === 'returning',
-    away: (state.reported || prev.away) && !docked,
   };
-  const positionAt = position === prev.position ? since.position ?? now : now;
-  const idling = state.jobActive && state.mowState === 0 && !docked;
-  if (!idling) {
-    return { state: settled, since: { position: positionAt, idle: undefined } };
-  }
-  const idleAt = since.idle ?? now;
+  const idleAt = state.jobActive && state.mowState === 0 && !docked ? since.idle ?? now : undefined;
+  const holding = idleAt !== undefined && now - idleAt <= IDLE_HOLD_MAX_MS;
   return {
-    state: now - idleAt > IDLE_HOLD_MAX_MS ? settled : { ...settled, mowing: prev.mowing },
-    since: { position: positionAt, idle: idleAt },
+    state: holding ? { ...settled, mowing: prev.mowing } : settled,
+    since: { position: position === prev.position ? since.position : now, idle: idleAt },
   };
 }
 

@@ -14,7 +14,7 @@ const allOn: SensorOptions = {
 
 function state(overrides: Partial<DerivedState> = {}): DerivedState {
   return {
-    position: 'dock', reported: true, docked: true, leaving: false, mowing: false, returning: false, away: false,
+    position: 'dock', reported: false, docked: true, leaving: false, mowing: false, returning: false,
     charging: false, paused: false, fault: false, attention: false,
     jobActive: false, battery: 100, lowBattery: false, mowState: 0, errorCode: 0, ...overrides,
   };
@@ -94,7 +94,7 @@ describe('MowerAccessory state pushes', () => {
     const docked = () => find(fakeHap.Service.ContactSensor, 'docked')?.value('ContactSensorState');
     mower.update(state({ jobActive: true }));
     mock.timers.tick(3000);
-    mower.update(state({ docked: false, leaving: true, away: true, jobActive: true }));
+    mower.update(state({ position: 'leaving', reported: true, docked: false, leaving: true, jobActive: true }));
     assert.equal(docked(), 1, 'opens on the push: the mower is moving ~1.5s later');
     mower.update(state({ jobActive: true }));
     assert.equal(docked(), 1, 'still open: the close waits out the debounce');
